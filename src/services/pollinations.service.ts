@@ -17,10 +17,10 @@ export class PollinationsServiceError extends AppError {
  * prompts (unlikely, given upstream dedupe) don't return a cached image.
  */
 export class PollinationsService {
-  async generateImage(prompt: string): Promise<Buffer> {
+  async generateImage(prompt: string, width = 1024, height = 1024): Promise<Buffer> {
     return retryWithBackoff(
       async (attempt) => {
-        appLogger.info('Requesting image from Pollinations AI', { attempt });
+        appLogger.info('Requesting image from Pollinations AI', { attempt, width, height });
 
         const encodedPrompt = encodeURIComponent(prompt);
         const seed = Date.now() % 1_000_000;
@@ -28,8 +28,8 @@ export class PollinationsService {
 
         const response = await axios.get<ArrayBuffer>(url, {
           params: {
-            width: 1024,
-            height: 1024,
+            width,
+            height,
             nologo: true,
             model: env.POLLINATIONS_MODEL,
             seed,

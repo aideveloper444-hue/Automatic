@@ -11,6 +11,17 @@ export const BRAND = {
     'dark navy or near-black background, glowing cyan-blue neon accent lighting, minimalist isometric 3D tech illustration style, glass and brushed-metal textures, clean professional enterprise SaaS aesthetic, high-quality 3D render, no readable text or logos anywhere in the image',
 };
 
+/**
+ * Per-platform feed image dimensions, so the same visual concept renders
+ * without awkward cropping on each network (LinkedIn's 1.91:1 feed ratio,
+ * Twitter's 16:9 in-feed ratio, Instagram's 1:1 square).
+ */
+export const IMAGE_DIMENSIONS = {
+  linkedin: { width: 1200, height: 627 },
+  twitter: { width: 1200, height: 675 },
+  instagram: { width: 1080, height: 1080 },
+} as const;
+
 export interface ServiceTopic {
   name: string;
   tagline: string;

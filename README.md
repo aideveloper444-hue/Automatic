@@ -2,9 +2,10 @@
 
 A production-ready Node.js + TypeScript SaaS automation service that generates 3 unique daily
 content ideas with Google's Gemini API, rewrites each one natively for **LinkedIn, Twitter/X, and
-Instagram**, generates Instagram's image with the free Pollinations AI API, and schedules all of
-them to Buffer — with zero manual work after deployment and near-zero running cost (Gemini free
-tier, Pollinations is keyless/free, GitHub Actions free tier, Buffer's own free plan).
+Instagram**, generates an on-brand AI image for all three (sized to each platform's own feed
+layout) with the free Pollinations AI API, and schedules everything to Buffer — with zero manual
+work after deployment and near-zero running cost (Gemini free tier, Pollinations is keyless/free,
+GitHub Actions free tier, Buffer's own free plan).
 
 ## What it does, every day, automatically
 
@@ -15,12 +16,16 @@ tier, Pollinations is keyless/free, GitHub Actions free tier, Buffer's own free 
    - **Morning — Educational**: an actionable lesson.
    - **Afternoon — Industry Insight**: a sharp trend or market observation.
    - **Evening — Engagement**: a conversation-starting question or opinion.
-   - **LinkedIn**: 180–300 words, hook + bullets + CTA + hashtags + emojis.
+   - **LinkedIn**: 180–300 words, hook + bullets + CTA + hashtags + emojis, plus an image sized
+     1200×627 (LinkedIn's feed ratio).
    - **Twitter/X**: a single tweet, hard-capped under 280 characters (text + hashtags combined) —
-     not a truncated LinkedIn post, a fresh punchy rewrite.
-   - **Instagram**: a 100–150 word caption + hashtags + an AI-generated image (Gemini writes the
-     image prompt, Pollinations AI generates the image for free, and it's uploaded to Cloudinary
-     so Buffer can fetch it by a stable URL — see below).
+     not a truncated LinkedIn post, a fresh punchy rewrite — plus an image sized 1200×675
+     (Twitter's in-feed ratio).
+   - **Instagram**: a 100–150 word caption + hashtags + an image sized 1080×1080 (square).
+   - All three images come from the _same_ AI-generated concept (one `imagePrompt` written
+     alongside the LinkedIn post) so the visual stays consistent across platforms, just resized
+     per platform's own layout rather than one generic image reused everywhere. Every post gets
+     exactly 4 hashtags and a CTA to the configured support email — enforced in code.
 3. Every generated post is checked against recent posts **on that same platform** for
    duplicate/similar content. If it's too similar, the model is asked to regenerate (up to 3
    attempts) rather than ever posting near-duplicate content.
@@ -28,9 +33,10 @@ tier, Pollinations is keyless/free, GitHub Actions free tier, Buffer's own free 
    automatically** (via Buffer's GraphQL API) and schedules all 9 posts (3 slots × 3 channels) to
    publish at **09:00, 14:00, and 19:00 IST** — Buffer itself handles the actual publish at that
    time, so nothing needs to stay running in between.
-5. Each channel is scheduled independently and failures are isolated: if Instagram fails (e.g.
-   Cloudinary not configured, Pollinations error), LinkedIn and Twitter for that slot still go
-   out.
+5. Each channel is scheduled independently and failures are isolated. Instagram requires an image
+   to post at all, so it's skipped entirely if Cloudinary isn't configured or image generation
+   fails. LinkedIn and Twitter degrade gracefully instead — if their image fails to generate for
+   any reason, they still post as text-only rather than losing the slot.
 6. Every step (API calls, duplicate detection, scheduling, publishing, failures) is written to
    Winston logs (`logs/app.log`, `logs/error.log`) and to the `Log` table in the database.
 7. Failed Buffer uploads are retried automatically with exponential backoff.
@@ -52,17 +58,18 @@ src/
   repositories/   post.repository.ts — all Prisma/database access
   services/
     gemini.service.ts     generateMorningPost() / generateAfternoonPost() /
-                           generateEveningPost() produce the LinkedIn post (source of truth)
-                           via the Gemini generateContent API; generateTwitterVariant() and
-                           generateInstagramVariant() rewrite that same idea per platform
-                           (the latter also writes the Instagram image prompt). All with
-                           duplicate-content regeneration, scoped per platform.
-    pollinations.service.ts generateImage() — free, keyless image generation
-                           (image.pollinations.ai) from the Gemini-written image prompt
+                           generateEveningPost() produce the LinkedIn post (source of truth) via
+                           the Gemini generateContent API, including the shared imagePrompt used
+                           for all 3 platforms' images; generateTwitterVariant() and
+                           generateInstagramVariant() rewrite that same idea per platform. All
+                           with duplicate-content regeneration, scoped per platform.
+    pollinations.service.ts generateImage(prompt, width, height) — free, keyless image
+                           generation (image.pollinations.ai), called once per platform with
+                           that platform's feed dimensions from brand.ts
     buffer.service.ts     getChannelIds(service) (auto-fetches connected channel IDs per
                            platform via Buffer's GraphQL API) and schedulePost() (createPost
-                           mutation per channel, with retry; attaches image + Instagram
-                           metadata when scheduling to Instagram)
+                           mutation per channel, with retry; attaches an image + Instagram
+                           metadata when one is provided)
     cloudinary.service.ts uploadImage() — re-hosts the Pollinations image at a stable URL so
                            Buffer can fetch it (Buffer's API has no upload endpoint of its own,
                            and this insulates the pipeline from Pollinations URL variability)
@@ -92,8 +99,9 @@ persistence) can be tested or swapped independently.
 Three tables, created via Prisma:
 
 - **Post** — `content`, `hashtags`, `createdAt`, `published`, `bufferPostId`, `status`, plus
-  `type` (morning/afternoon/evening), `platform` (linkedin/twitter/instagram), `imageUrl`
-  (Instagram only), `duplicateScore`, and a `topicId` relation. One row per platform per slot —
+  `type` (morning/afternoon/evening), `platform` (linkedin/twitter/instagram), `imageUrl` (set
+  whenever an image was generated for that post — always for Instagram, best-effort for
+  LinkedIn/Twitter), `duplicateScore`, and a `topicId` relation. One row per platform per slot —
   up to 9 rows/day.
 - **Topic** — one row per service line, round-robin rotated via `lastUsedAt` (see below).
 - **Log** — `level`, `message`, `metadata`, timestamped, optionally linked to a `Post`.
@@ -123,17 +131,26 @@ the last 20 posts **on that same platform**. Anything at or above a 0.7 similari
 treated as a duplicate and triggers regeneration instead of being published — the pipeline never
 knowingly schedules near-duplicate content.
 
-### Instagram image generation and hosting
+### Image generation and per-platform sizing
 
-Gemini writes a visual `imagePrompt` (with an explicit "no readable text/letters" instruction, so
-image models don't render garbled text) as part of `generateInstagramVariant()`. That prompt goes
-to `pollinations.service.ts`, which calls `image.pollinations.ai/prompt/<prompt>` — free, no API
-key. Buffer's `createPost` mutation requires a real, publicly fetchable image URL for Instagram
-(its API has no upload endpoint), so rather than passing Pollinations' URL directly, the image
-bytes are re-uploaded to Cloudinary (`cloudinary.service.ts`, signed upload via axios + Node's
-built-in `crypto` — no SDK dependency) for a guaranteed-stable URL before scheduling. If
-`CLOUDINARY_*` env vars aren't set, Instagram scheduling is skipped automatically for that run
-(logged, not fatal) — LinkedIn and Twitter still go out normally.
+Gemini writes one visual `imagePrompt` per slot (with an explicit "no readable text/letters"
+instruction, so image models don't render garbled text) alongside the LinkedIn post — this is the
+single shared concept used for that slot's images on all three platforms, so the visual identity
+stays consistent even though the file itself differs per network. That prompt goes to
+`pollinations.service.ts`, which calls `image.pollinations.ai/prompt/<prompt>` — free, no API key
+— once per platform, requesting `IMAGE_DIMENSIONS` from `brand.ts` (LinkedIn 1200×627, Twitter
+1200×675, Instagram 1080×1080) so each image matches that network's actual feed aspect ratio
+rather than being cropped from one generic square. (Pollinations' free tier caps the actual pixel
+resolution below what's requested — the aspect ratio is exact, the file just isn't max-resolution;
+still well within normal social-image quality.)
+
+Buffer's `createPost` mutation requires a real, publicly fetchable image URL (its API has no
+upload endpoint), so rather than passing Pollinations' URL directly, each image's bytes are
+re-uploaded to Cloudinary (`cloudinary.service.ts`, signed upload via axios + Node's built-in
+`crypto` — no SDK dependency) for a guaranteed-stable URL before scheduling. If `CLOUDINARY_*` env
+vars aren't set: Instagram is skipped entirely for that run (it cannot post without an image),
+while LinkedIn and Twitter still go out as text-only rather than losing the slot. The same
+graceful fallback applies if image generation itself fails for LinkedIn/Twitter specifically.
 
 ## Environment variables
 

@@ -1,7 +1,7 @@
 import cron from 'node-cron';
 import { appLogger } from '../config/logger.js';
 import { env, isCloudinaryConfigured } from '../config/env.js';
-import { SERVICE_TOPICS } from '../config/brand.js';
+import { IMAGE_DIMENSIONS, SERVICE_TOPICS } from '../config/brand.js';
 import { GeminiService, GeneratedPostPayload, PostType } from './gemini.service.js';
 import { BufferService } from './buffer.service.js';
 import { CloudinaryService } from './cloudinary.service.js';
@@ -52,9 +52,10 @@ export class SchedulerService {
 
   /**
    * One Alphazox service (round-robin, see PostRepository.getNextTopic) per
-   * slot, generated once as the LinkedIn post, then rewritten per platform.
-   * LinkedIn/Twitter/Instagram are each wrapped in their own try/catch so
-   * one platform's failure never blocks the others.
+   * slot, generated once as the LinkedIn post (including a shared image
+   * prompt), then rewritten per platform. LinkedIn/Twitter/Instagram are
+   * each wrapped in their own try/catch so one platform's failure never
+   * blocks the others.
    */
   private async runSlot(postType: PostType, time: string, scheduleStamp: Date): Promise<void> {
     const topicRecord = await this.postRepository.getNextTopic();
@@ -107,12 +108,45 @@ export class SchedulerService {
     }
   }
 
+  /**
+   * Generates a platform-sized image from the shared imagePrompt. Returns
+   * undefined (rather than throwing) on failure or when Cloudinary isn't
+   * configured, so LinkedIn/Twitter callers can fall back to a text-only
+   * post instead of losing the whole slot over an image problem.
+   */
+  private async tryGenerateImage(
+    imagePrompt: string,
+    platform: keyof typeof IMAGE_DIMENSIONS,
+    label: string,
+  ): Promise<string | undefined> {
+    if (!isCloudinaryConfigured) {
+      return undefined;
+    }
+
+    try {
+      const { width, height } = IMAGE_DIMENSIONS[platform];
+      const imageBuffer = await this.pollinationsService.generateImage(imagePrompt, width, height);
+      return await this.cloudinaryService.uploadImage(imageBuffer, `${label}-${Date.now()}`);
+    } catch (error) {
+      appLogger.error(`Image generation failed for ${label}; continuing without an image`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
   private async scheduleLinkedIn(
     post: GeneratedPostPayload,
     topicId: number,
     dueAt: string,
   ): Promise<void> {
     try {
+      const imageUrl = await this.tryGenerateImage(
+        post.imagePrompt,
+        'linkedin',
+        `${post.type}-linkedin`,
+      );
+
       const saved = await this.postRepository.savePost({
         type: post.type,
         platform: 'linkedin',
@@ -120,6 +154,7 @@ export class SchedulerService {
         hashtags: post.hashtags,
         status: 'scheduled',
         topicId,
+        imageUrl,
       });
 
       await this.bufferService.schedulePost({
@@ -127,6 +162,7 @@ export class SchedulerService {
         text: `${post.content}\n\n${post.hashtags}`,
         scheduledAt: dueAt,
         service: 'linkedin',
+        imageUrl,
       });
     } catch (error) {
       appLogger.error('LinkedIn scheduling failed for this slot', {
@@ -143,6 +179,11 @@ export class SchedulerService {
   ): Promise<void> {
     try {
       const variant = await this.geminiService.generateTwitterVariant(post.topic, post.content);
+      const imageUrl = await this.tryGenerateImage(
+        post.imagePrompt,
+        'twitter',
+        `${post.type}-twitter`,
+      );
 
       const saved = await this.postRepository.savePost({
         type: post.type,
@@ -151,6 +192,7 @@ export class SchedulerService {
         hashtags: variant.hashtags,
         status: 'scheduled',
         topicId,
+        imageUrl,
       });
 
       await this.bufferService.schedulePost({
@@ -158,6 +200,7 @@ export class SchedulerService {
         text: variant.hashtags ? `${variant.content} ${variant.hashtags}` : variant.content,
         scheduledAt: dueAt,
         service: 'twitter',
+        imageUrl,
       });
     } catch (error) {
       appLogger.error('Twitter scheduling failed for this slot', {
@@ -179,10 +222,15 @@ export class SchedulerService {
 
     try {
       const variant = await this.geminiService.generateInstagramVariant(post.topic, post.content);
-      const imageBuffer = await this.pollinationsService.generateImage(variant.imagePrompt);
+      const { width, height } = IMAGE_DIMENSIONS.instagram;
+      const imageBuffer = await this.pollinationsService.generateImage(
+        post.imagePrompt,
+        width,
+        height,
+      );
       const imageUrl = await this.cloudinaryService.uploadImage(
         imageBuffer,
-        `${post.type}-${Date.now()}`,
+        `${post.type}-instagram-${Date.now()}`,
       );
 
       const saved = await this.postRepository.savePost({

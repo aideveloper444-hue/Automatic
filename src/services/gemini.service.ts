@@ -19,6 +19,7 @@ export interface GeneratedPostPayload {
   topic: string;
   content: string;
   hashtags: string;
+  imagePrompt: string;
 }
 
 export interface TwitterVariantPayload {
@@ -29,7 +30,6 @@ export interface TwitterVariantPayload {
 export interface InstagramVariantPayload {
   caption: string;
   hashtags: string;
-  imagePrompt: string;
 }
 
 const DUPLICATE_SIMILARITY_THRESHOLD = 0.7;
@@ -84,10 +84,16 @@ Requirements:
 - End with a CTA that invites the reader to reach out to ${BRAND.name} at ${BRAND.supportEmail}.
 - Tone should be polished, original, and distinctive - written as ${BRAND.name}, not generically.
 - Keep the content between 180 and 300 words.
-- Output JSON only with keys: content, hashtags.
+- Output JSON only with keys: content, hashtags, imagePrompt.
 - "hashtags" MUST be a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT}
   relevant hashtags (e.g. "#CloudNative #DevOps #Kubernetes #Alphazox"), NOT a JSON array, not
   more and not fewer than ${REQUIRED_HASHTAG_COUNT}.
+- imagePrompt: a vivid, concrete visual description for an AI image generator that represents
+  this post's idea, matching this exact visual style: ${BRAND.imageStyle}. This same image will
+  be used (resized) across LinkedIn, Twitter, and Instagram for this post, so keep the described
+  composition centered and reasonably square/flexible rather than relying on extreme wide or
+  tall framing. The described image must contain NO readable text, words, or letters in it -
+  describe only visual elements, style, mood, and composition.
 - Ensure the content is uniquely phrased and not generic.`;
   }
 
@@ -126,7 +132,7 @@ Requirements:
         continue;
       }
 
-      const { content, hashtags } = validation.data;
+      const { content, hashtags, imagePrompt } = validation.data;
 
       if (countHashtags(hashtags) !== REQUIRED_HASHTAG_COUNT) {
         appLogger.warn('LinkedIn post did not have exactly the required hashtag count', {
@@ -143,7 +149,7 @@ Requirements:
         continue;
       }
 
-      return { type: postType, topic: topic.name, content, hashtags };
+      return { type: postType, topic: topic.name, content, hashtags, imagePrompt };
     }
 
     throw new GeminiServiceError(
@@ -222,7 +228,7 @@ Requirements:
     topic: string,
     sourceContent: string,
   ): Promise<InstagramVariantPayload> {
-    const prompt = `Rewrite the following idea as an Instagram caption, plus an image prompt, for
+    const prompt = `Rewrite the following idea as an Instagram caption, for
 ${BRAND.name} (${BRAND.tagline}).
 Idea/topic: ${topic}
 Source LinkedIn post (for context only, do not copy verbatim):
@@ -234,11 +240,7 @@ Requirements:
   to reach out at ${BRAND.supportEmail}.
 - hashtags: a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT} relevant
   hashtags (e.g. "#AI #Enterprise #Alphazox #Innovation"), NOT a JSON array.
-- imagePrompt: a vivid, concrete visual description for an AI image generator that represents
-  this idea, matching this exact visual style: ${BRAND.imageStyle}. The described image must
-  contain NO readable text, words, or letters in it - describe only visual elements, style,
-  mood, and composition.
-- Output JSON only with keys: caption, hashtags, imagePrompt.`;
+- Output JSON only with keys: caption, hashtags.`;
 
     for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
       const rawText = await this.callGeminiApi(prompt, 'Instagram', attempt);
@@ -257,7 +259,7 @@ Requirements:
         continue;
       }
 
-      const { caption, hashtags, imagePrompt } = validation.data;
+      const { caption, hashtags } = validation.data;
 
       if (countHashtags(hashtags) !== REQUIRED_HASHTAG_COUNT) {
         appLogger.warn('Instagram variant did not have exactly the required hashtag count', {
@@ -274,7 +276,7 @@ Requirements:
         continue;
       }
 
-      return { caption, hashtags, imagePrompt };
+      return { caption, hashtags };
     }
 
     throw new GeminiServiceError('Unable to generate a unique Instagram post after retries');
