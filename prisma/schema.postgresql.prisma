@@ -1,0 +1,42 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Post {
+  id             Int      @id @default(autoincrement())
+  type           String
+  platform       String   @default("linkedin")
+  content        String
+  hashtags       String
+  imageUrl       String?
+  createdAt      DateTime @default(now())
+  published      Boolean  @default(false)
+  bufferPostId   String?
+  status         String   @default("draft")
+  duplicateScore Float?
+  topicId        Int?
+  topic          Topic?   @relation(fields: [topicId], references: [id])
+  logs           Log[]
+}
+
+model Topic {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  posts     Post[]
+}
+
+model Log {
+  id        Int      @id @default(autoincrement())
+  level     String
+  message   String
+  metadata  String?
+  createdAt DateTime @default(now())
+  postId    Int?
+  post      Post?    @relation(fields: [postId], references: [id])
+}
