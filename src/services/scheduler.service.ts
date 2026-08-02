@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { appLogger } from '../config/logger.js';
 import { env, isCloudinaryConfigured } from '../config/env.js';
+import { SERVICE_TOPICS } from '../config/brand.js';
 import { GeminiService, GeneratedPostPayload, PostType } from './gemini.service.js';
 import { BufferService } from './buffer.service.js';
 import { CloudinaryService } from './cloudinary.service.js';
@@ -38,6 +39,8 @@ export class SchedulerService {
 
   async runDailyAutomation() {
     appLogger.info('Daily automation run started');
+    await this.postRepository.ensureSeedTopics(SERVICE_TOPICS.map((t) => t.name));
+
     const scheduleStamp = new Date();
 
     for (const slot of SLOTS) {
@@ -48,44 +51,59 @@ export class SchedulerService {
   }
 
   /**
-   * One topic/idea per slot, generated once as the LinkedIn post, then
-   * rewritten per platform. LinkedIn/Twitter/Instagram are each wrapped in
-   * their own try/catch so one platform's failure (e.g. Cloudinary not
-   * configured, or a transient Buffer/Gemini/Pollinations error) never
-   * blocks the others.
+   * One Alphazox service (round-robin, see PostRepository.getNextTopic) per
+   * slot, generated once as the LinkedIn post, then rewritten per platform.
+   * LinkedIn/Twitter/Instagram are each wrapped in their own try/catch so
+   * one platform's failure never blocks the others.
    */
   private async runSlot(postType: PostType, time: string, scheduleStamp: Date): Promise<void> {
+    const topicRecord = await this.postRepository.getNextTopic();
+    const serviceTopic = SERVICE_TOPICS.find((t) => t.name === topicRecord.name);
+
+    if (!serviceTopic) {
+      appLogger.error(
+        `Topic "${topicRecord.name}" has no matching service definition; skipping slot`,
+        {
+          postType,
+        },
+      );
+      return;
+    }
+
     let linkedInPost: GeneratedPostPayload;
 
     try {
-      linkedInPost = await this.generateLinkedInForSlot(postType);
+      linkedInPost = await this.generateLinkedInForSlot(postType, serviceTopic);
     } catch (error) {
       appLogger.error(
         `Failed to generate the source LinkedIn post for ${postType}; skipping slot`,
         {
           postType,
+          topic: serviceTopic.name,
           error: error instanceof Error ? error.message : String(error),
         },
       );
       return;
     }
 
-    const topic = await this.postRepository.createTopicIfMissing(linkedInPost.topic);
     const dueAt = this.buildScheduleDateString(scheduleStamp, time);
 
-    await this.scheduleLinkedIn(linkedInPost, topic.id, dueAt);
-    await this.scheduleTwitter(linkedInPost, topic.id, dueAt);
-    await this.scheduleInstagram(linkedInPost, topic.id, dueAt);
+    await this.scheduleLinkedIn(linkedInPost, topicRecord.id, dueAt);
+    await this.scheduleTwitter(linkedInPost, topicRecord.id, dueAt);
+    await this.scheduleInstagram(linkedInPost, topicRecord.id, dueAt);
   }
 
-  private async generateLinkedInForSlot(postType: PostType): Promise<GeneratedPostPayload> {
+  private async generateLinkedInForSlot(
+    postType: PostType,
+    topic: (typeof SERVICE_TOPICS)[number],
+  ): Promise<GeneratedPostPayload> {
     switch (postType) {
       case 'morning':
-        return this.geminiService.generateMorningPost();
+        return this.geminiService.generateMorningPost(topic);
       case 'afternoon':
-        return this.geminiService.generateAfternoonPost();
+        return this.geminiService.generateAfternoonPost(topic);
       case 'evening':
-        return this.geminiService.generateEveningPost();
+        return this.geminiService.generateEveningPost(topic);
     }
   }
 

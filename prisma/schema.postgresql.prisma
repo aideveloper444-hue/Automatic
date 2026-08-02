@@ -25,10 +25,11 @@ model Post {
 }
 
 model Topic {
-  id        Int      @id @default(autoincrement())
-  name      String   @unique
-  createdAt DateTime @default(now())
-  posts     Post[]
+  id         Int       @id @default(autoincrement())
+  name       String    @unique
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  posts      Post[]
 }
 
 model Log {

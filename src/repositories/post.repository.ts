@@ -79,18 +79,37 @@ export class PostRepository {
     });
   }
 
-  async findTopicByName(name: string) {
-    return this.prisma.topic.findUnique({ where: { name } });
+  /** Idempotently ensures each of the given topic names exists as a row. */
+  async ensureSeedTopics(names: string[]) {
+    for (const name of names) {
+      await this.prisma.topic.upsert({
+        where: { name },
+        update: {},
+        create: { name },
+      });
+    }
   }
 
-  async createTopicIfMissing(name: string) {
-    const topic = await this.findTopicByName(name);
-    if (topic) {
-      return topic;
+  /**
+   * Round-robin topic selection: picks whichever topic was used longest ago
+   * (never-used topics first), marks it used now, and returns it. Callers
+   * should call ensureSeedTopics() first so there's always a full pool to
+   * rotate through.
+   */
+  async getNextTopic() {
+    const topic = await this.prisma.topic.findFirst({
+      orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }, { id: 'asc' }],
+    });
+
+    if (!topic) {
+      throw new Error('No topics available - call ensureSeedTopics() first');
     }
 
-    return this.prisma.topic.create({
-      data: { name },
+    await this.prisma.topic.update({
+      where: { id: topic.id },
+      data: { lastUsedAt: new Date() },
     });
+
+    return topic;
   }
 }

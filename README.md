@@ -95,8 +95,26 @@ Three tables, created via Prisma:
   `type` (morning/afternoon/evening), `platform` (linkedin/twitter/instagram), `imageUrl`
   (Instagram only), `duplicateScore`, and a `topicId` relation. One row per platform per slot —
   up to 9 rows/day.
-- **Topic** — the shared idea each slot's posts were generated about.
+- **Topic** — one row per service line, round-robin rotated via `lastUsedAt` (see below).
 - **Log** — `level`, `message`, `metadata`, timestamped, optionally linked to a `Post`.
+
+### Brand customization
+
+`src/config/brand.ts` is where this deployment's identity lives: company name, tagline, website,
+support email, the Instagram image style description, and the list of `SERVICE_TOPICS` content
+rotates through. This instance is configured for **Alphazox** (10 service lines: Cloud Native
+Solutions, AI Model Development, Enterprise Solutions, Data Engineering, Quality Assurance,
+Product Design, Mobile App Maintenance, Cyber Security, IT Infrastructure, Emerging
+Technologies). To reuse this project for a different company, edit that one file — no other
+source changes needed.
+
+Every post is generated about one specific service from that list, never a generic/invented
+topic. `PostRepository.getNextTopic()` picks whichever service was used longest ago (round-robin
+via `Topic.lastUsedAt`, ties broken by insertion order), so consecutive posts — and consecutive
+days — cycle through all services rather than repeating one. Every generated post (LinkedIn,
+Twitter, Instagram) mandates exactly 4 hashtags and a CTA pointing to the configured support
+email; both are enforced in code (not just prompted for) — hashtag count is counted and
+regenerated on mismatch, same pattern as the Twitter character-limit check.
 
 ### Duplicate detection
 

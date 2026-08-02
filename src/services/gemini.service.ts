@@ -4,6 +4,7 @@ import { env } from '../config/env.js';
 import { appLogger } from '../config/logger.js';
 import { calculateTextSimilarity } from '../utils/similarity.js';
 import { GeminiServiceError } from '../utils/errors.js';
+import { BRAND, ServiceTopic } from '../config/brand.js';
 import {
   GeneratedPostSchema,
   InstagramVariantSchema,
@@ -34,6 +35,7 @@ export interface InstagramVariantPayload {
 const DUPLICATE_SIMILARITY_THRESHOLD = 0.7;
 const MAX_GENERATION_ATTEMPTS = 3;
 const TWITTER_CHAR_LIMIT = 280;
+const REQUIRED_HASHTAG_COUNT = 4;
 
 const GeminiResponseSchema = z.object({
   candidates: z
@@ -49,55 +51,63 @@ const GeminiResponseSchema = z.object({
     .min(1),
 });
 
+function countHashtags(hashtags: string): number {
+  return hashtags
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.startsWith('#')).length;
+}
+
+function describeTopic(topic: ServiceTopic): string {
+  return `${topic.name} ("${topic.tagline}") — key capabilities: ${topic.capabilities.join(', ')}`;
+}
+
 export class GeminiService {
   constructor(private readonly postRepository: PostRepository) {}
 
-  private buildLinkedInPrompt(postType: PostType): string {
-    const instructions = {
-      morning: {
-        title: 'Morning Educational',
-        focus: 'teach an actionable lesson related to software engineering or SaaS',
-      },
-      afternoon: {
-        title: 'Afternoon Industry Insight',
-        focus: 'share a sharp trend, observation, or market insight',
-      },
-      evening: {
-        title: 'Evening Engagement',
-        focus: 'start a conversation through a challenge, opinion, or relatable experience',
-      },
+  private buildLinkedInPrompt(postType: PostType, topic: ServiceTopic): string {
+    const angles = {
+      morning: 'an educational angle: teach the reader something actionable about this service',
+      afternoon: 'an industry-insight angle: a sharp observation or trend related to this service',
+      evening:
+        'an engagement angle: a conversation-starting question or opinion about this service',
     };
 
-    const template = instructions[postType];
+    return `Create exactly one high-performing LinkedIn post for ${BRAND.name}, a ${BRAND.tagline}
+(${BRAND.website}).
 
-    return `Create exactly one high-performing LinkedIn post. Requirements:
-- Post type: ${template.title}
-- Focus: ${template.focus}
-- Must contain a viral hook, emojis, at least 3 bullet points when helpful, a CTA, and 3-5 hashtags.
-- Tone should be polished, original, and distinctive.
-- Do not repeat any previous topics, wording, or style.
-- Output JSON only with keys: content, hashtags, topic.
-- "hashtags" MUST be a single space-separated string (e.g. "#SaaS #AI #Startup"), NOT a JSON array.
+Write about this specific service: ${describeTopic(topic)}
+
+Requirements:
+- Approach: ${angles[postType]}.
+- Must contain a viral hook, emojis, at least 3 bullet points when helpful, and a clear CTA.
+- End with a CTA that invites the reader to reach out to ${BRAND.name} at ${BRAND.supportEmail}.
+- Tone should be polished, original, and distinctive - written as ${BRAND.name}, not generically.
 - Keep the content between 180 and 300 words.
-- Use a clear CTA such as 'What are you building this week?' or 'What would you add?'
-- Include hashtags like #SaaS #AI #LinkedInGrowth #Startup #Productivity
+- Output JSON only with keys: content, hashtags.
+- "hashtags" MUST be a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT}
+  relevant hashtags (e.g. "#CloudNative #DevOps #Kubernetes #Alphazox"), NOT a JSON array, not
+  more and not fewer than ${REQUIRED_HASHTAG_COUNT}.
 - Ensure the content is uniquely phrased and not generic.`;
   }
 
-  async generateMorningPost(): Promise<GeneratedPostPayload> {
-    return this.generateLinkedInPost('morning');
+  async generateMorningPost(topic: ServiceTopic): Promise<GeneratedPostPayload> {
+    return this.generateLinkedInPost('morning', topic);
   }
 
-  async generateAfternoonPost(): Promise<GeneratedPostPayload> {
-    return this.generateLinkedInPost('afternoon');
+  async generateAfternoonPost(topic: ServiceTopic): Promise<GeneratedPostPayload> {
+    return this.generateLinkedInPost('afternoon', topic);
   }
 
-  async generateEveningPost(): Promise<GeneratedPostPayload> {
-    return this.generateLinkedInPost('evening');
+  async generateEveningPost(topic: ServiceTopic): Promise<GeneratedPostPayload> {
+    return this.generateLinkedInPost('evening', topic);
   }
 
-  private async generateLinkedInPost(postType: PostType): Promise<GeneratedPostPayload> {
-    const prompt = this.buildLinkedInPrompt(postType);
+  private async generateLinkedInPost(
+    postType: PostType,
+    topic: ServiceTopic,
+  ): Promise<GeneratedPostPayload> {
+    const prompt = this.buildLinkedInPrompt(postType, topic);
 
     for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
       const rawText = await this.callGeminiApi(prompt, `LinkedIn(${postType})`, attempt);
@@ -116,7 +126,15 @@ export class GeminiService {
         continue;
       }
 
-      const { content, hashtags, topic } = validation.data;
+      const { content, hashtags } = validation.data;
+
+      if (countHashtags(hashtags) !== REQUIRED_HASHTAG_COUNT) {
+        appLogger.warn('LinkedIn post did not have exactly the required hashtag count', {
+          attempt,
+          count: countHashtags(hashtags),
+        });
+        continue;
+      }
 
       if (await this.isDuplicateAgainstRecent(content, 'linkedin')) {
         appLogger.info(`Duplicate detected for LinkedIn ${postType}; regenerating content`, {
@@ -125,7 +143,7 @@ export class GeminiService {
         continue;
       }
 
-      return { type: postType, topic, content, hashtags };
+      return { type: postType, topic: topic.name, content, hashtags };
     }
 
     throw new GeminiServiceError(
@@ -137,7 +155,8 @@ export class GeminiService {
     topic: string,
     sourceContent: string,
   ): Promise<TwitterVariantPayload> {
-    const prompt = `Rewrite the following idea as a single, punchy tweet for X/Twitter.
+    const prompt = `Rewrite the following idea as a single, punchy tweet for X/Twitter, for
+${BRAND.name} (${BRAND.tagline}).
 Idea/topic: ${topic}
 Source LinkedIn post (for context only, do not copy verbatim):
 """
@@ -145,11 +164,12 @@ ${sourceContent}
 """
 Requirements:
 - The tweet text plus hashtags together must be under ${TWITTER_CHAR_LIMIT} characters TOTAL.
-- Keep 1-2 relevant hashtags at most.
-- Emojis optional, use sparingly.
+- Include "${BRAND.supportEmail}" in the tweet if space allows; if it genuinely doesn't fit,
+  prioritize the hashtags and core message instead.
 - Punchy, original phrasing - do not copy sentences from the source post.
 - Output JSON only with keys: content, hashtags.
-- "hashtags" MUST be a single space-separated string (e.g. "#SaaS #AI"), NOT a JSON array.`;
+- "hashtags" MUST be a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT}
+  hashtags, NOT a JSON array.`;
 
     for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
       const rawText = await this.callGeminiApi(prompt, 'Twitter', attempt);
@@ -179,6 +199,14 @@ Requirements:
         continue;
       }
 
+      if (countHashtags(hashtags) !== REQUIRED_HASHTAG_COUNT) {
+        appLogger.warn('Twitter variant did not have exactly the required hashtag count', {
+          attempt,
+          count: countHashtags(hashtags),
+        });
+        continue;
+      }
+
       if (await this.isDuplicateAgainstRecent(content, 'twitter')) {
         appLogger.info('Duplicate detected for Twitter variant; regenerating content', { attempt });
         continue;
@@ -194,19 +222,22 @@ Requirements:
     topic: string,
     sourceContent: string,
   ): Promise<InstagramVariantPayload> {
-    const prompt = `Rewrite the following idea as an Instagram caption, plus an image prompt.
+    const prompt = `Rewrite the following idea as an Instagram caption, plus an image prompt, for
+${BRAND.name} (${BRAND.tagline}).
 Idea/topic: ${topic}
 Source LinkedIn post (for context only, do not copy verbatim):
 """
 ${sourceContent}
 """
 Requirements:
-- caption: 100-150 words, engaging, emojis welcome, ends with a call to action.
-- hashtags: 5-8 relevant hashtags as a single space-separated string (e.g. "#SaaS #AI #Startup"),
-  NOT a JSON array.
+- caption: 100-150 words, engaging, emojis welcome, ends with a call to action inviting readers
+  to reach out at ${BRAND.supportEmail}.
+- hashtags: a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT} relevant
+  hashtags (e.g. "#AI #Enterprise #Alphazox #Innovation"), NOT a JSON array.
 - imagePrompt: a vivid, concrete visual description for an AI image generator that represents
-  this idea. The described image must contain NO readable text, words, or letters in it -
-  describe only visual elements, style, mood, and composition.
+  this idea, matching this exact visual style: ${BRAND.imageStyle}. The described image must
+  contain NO readable text, words, or letters in it - describe only visual elements, style,
+  mood, and composition.
 - Output JSON only with keys: caption, hashtags, imagePrompt.`;
 
     for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
@@ -227,6 +258,14 @@ Requirements:
       }
 
       const { caption, hashtags, imagePrompt } = validation.data;
+
+      if (countHashtags(hashtags) !== REQUIRED_HASHTAG_COUNT) {
+        appLogger.warn('Instagram variant did not have exactly the required hashtag count', {
+          attempt,
+          count: countHashtags(hashtags),
+        });
+        continue;
+      }
 
       if (await this.isDuplicateAgainstRecent(caption, 'instagram')) {
         appLogger.info('Duplicate detected for Instagram variant; regenerating content', {
@@ -264,7 +303,10 @@ Requirements:
             'x-goog-api-key': env.GEMINI_API_KEY,
             'Content-Type': 'application/json',
           },
-          timeout: 30000,
+          // Gemini's "thinking" mode can occasionally run past 30s even for
+          // short structured-output prompts; give it more headroom before
+          // treating it as a failure and burning a retry.
+          timeout: 60000,
         },
       );
 

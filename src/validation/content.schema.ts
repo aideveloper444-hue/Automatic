@@ -15,7 +15,6 @@ const hashtagsField = z.preprocess((value) => {
 export const GeneratedPostSchema = z.object({
   content: z.string().min(1, 'content must not be empty'),
   hashtags: hashtagsField.pipe(z.string().min(1, 'hashtags must not be empty')),
-  topic: z.string().min(1, 'topic must not be empty'),
 });
 
 export type GeneratedPostJson = z.infer<typeof GeneratedPostSchema>;
