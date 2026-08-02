@@ -58,7 +58,7 @@ export class SchedulerService {
    * blocks the others.
    */
   private async runSlot(postType: PostType, time: string, scheduleStamp: Date): Promise<void> {
-    const topicRecord = await this.postRepository.getNextTopic();
+    const topicRecord = await this.postRepository.getNextTopic(SERVICE_TOPICS.map((t) => t.name));
     const serviceTopic = SERVICE_TOPICS.find((t) => t.name === topicRecord.name);
 
     if (!serviceTopic) {

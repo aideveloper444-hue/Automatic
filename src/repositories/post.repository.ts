@@ -95,9 +95,15 @@ export class PostRepository {
    * (never-used topics first), marks it used now, and returns it. Callers
    * should call ensureSeedTopics() first so there's always a full pool to
    * rotate through.
+   *
+   * Scoped to `validNames` so any stale/orphaned rows left over from a
+   * previous content strategy (e.g. free-form topics invented before this
+   * project's brand config existed) are never selected just because they
+   * happen to have a lower id or an untouched lastUsedAt.
    */
-  async getNextTopic() {
+  async getNextTopic(validNames: string[]) {
     const topic = await this.prisma.topic.findFirst({
+      where: { name: { in: validNames } },
       orderBy: [{ lastUsedAt: { sort: 'asc', nulls: 'first' } }, { id: 'asc' }],
     });
 
