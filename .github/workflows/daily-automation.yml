@@ -23,6 +23,10 @@ concurrency:
 jobs:
   run-automation:
     runs-on: ubuntu-latest
+    env:
+      # Needed by every Prisma step (generate/db push), not just the final
+      # script — hoisted to job level so it's never missing partway through.
+      DATABASE_URL: ${{ secrets.DATABASE_URL || 'file:./dev.db' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -60,7 +64,6 @@ jobs:
           CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
           CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
           CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL || 'file:./dev.db' }}
           PORT: 3000
           TIMEZONE: Asia/Kolkata
         run: npm run generate:daily
