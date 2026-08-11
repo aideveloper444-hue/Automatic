@@ -11,8 +11,18 @@ import type { PostRepository } from '../repositories/post.repository.js';
 import type { ThemedPostPayload, TwitterVariantPayload } from './gemini.service.js';
 
 const MAX_GENERATION_ATTEMPTS = 3;
+const TWITTER_MAX_GENERATION_ATTEMPTS = 5;
 const TWITTER_CHAR_LIMIT = 280;
 const REQUIRED_HASHTAG_COUNT = 4;
+/**
+ * Jaccard word-overlap similarity trips much more easily on short text than
+ * on a full caption - two genuinely different ~30-word tweets about the same
+ * theme will often share half their words (brand name, theme keywords,
+ * connective words). 0.7 is right for the 80-150 word themed caption but was
+ * causing Twitter to get skipped almost every run; 0.85 keeps real
+ * near-duplicates out without flagging distinct tweets.
+ */
+const TWITTER_SIMILARITY_THRESHOLD = 0.85;
 
 const GroqResponseSchema = z.object({
   choices: z
@@ -110,7 +120,11 @@ Output JSON only with keys: headline, subheadline, caption, hashtags.
     throw new GroqServiceError(`Unable to generate a unique themed post (${theme.id}) after retries`);
   }
 
-  async generateTwitterVariant(topic: string, sourceContent: string): Promise<TwitterVariantPayload> {
+  async generateTwitterVariant(
+    topic: string,
+    sourceContent: string,
+    fallbackHashtags?: string,
+  ): Promise<TwitterVariantPayload> {
     const prompt = `Rewrite the following idea as a single, punchy tweet for X/Twitter, for
 ${BRAND.name} (${BRAND.tagline}).
 Idea/topic: ${topic}
@@ -125,8 +139,8 @@ Requirements:
 - "hashtags" MUST be a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT}
   hashtags, NOT a JSON array.`;
 
-    for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
-      const rawText = await this.callGroqApi(prompt, 'Twitter', attempt);
+    for (let attempt = 1; attempt <= TWITTER_MAX_GENERATION_ATTEMPTS; attempt += 1) {
+      const rawText = await this.callGroqApi(prompt, 'Twitter', attempt, TWITTER_MAX_GENERATION_ATTEMPTS);
 
       if (rawText === null) {
         continue;
@@ -158,7 +172,7 @@ Requirements:
         continue;
       }
 
-      if (await this.isDuplicateAgainstRecent(content, 'twitter')) {
+      if (await this.isDuplicateAgainstRecent(content, 'twitter', TWITTER_SIMILARITY_THRESHOLD)) {
         appLogger.info('Duplicate detected for Twitter variant; regenerating content', { attempt });
         continue;
       }
@@ -166,10 +180,32 @@ Requirements:
       return { content, hashtags };
     }
 
-    throw new GroqServiceError('Unable to generate a unique Twitter post after retries');
+    appLogger.warn(
+      'Unable to generate a unique Twitter post after retries; falling back to a truncated version of the source content so the slot is not skipped',
+    );
+    return this.buildFallbackTwitterVariant(sourceContent, fallbackHashtags);
   }
 
-  private async callGroqApi(prompt: string, label: string, attempt: number): Promise<string | null> {
+  /**
+   * Last resort so a stubborn duplicate/validation loop never costs Twitter
+   * its slot for the hour - reuses the already-approved themed caption
+   * (trimmed to fit) instead of throwing and skipping the platform.
+   */
+  private buildFallbackTwitterVariant(sourceContent: string, fallbackHashtags?: string): TwitterVariantPayload {
+    const hashtags = fallbackHashtags ?? '';
+    const budget = hashtags ? TWITTER_CHAR_LIMIT - hashtags.length - 1 : TWITTER_CHAR_LIMIT;
+    const trimmed =
+      sourceContent.length > budget ? `${sourceContent.slice(0, Math.max(0, budget - 1)).trim()}…` : sourceContent;
+
+    return { content: trimmed, hashtags };
+  }
+
+  private async callGroqApi(
+    prompt: string,
+    label: string,
+    attempt: number,
+    maxAttempts: number = MAX_GENERATION_ATTEMPTS,
+  ): Promise<string | null> {
     appLogger.info('Calling Groq chat completions API', { label, attempt, model: env.GROQ_MODEL });
 
     try {
@@ -201,7 +237,7 @@ Requirements:
       const message = error instanceof Error ? error.message : String(error);
       appLogger.error('Groq API call failed', { label, attempt, error: message });
 
-      if (attempt === MAX_GENERATION_ATTEMPTS) {
+      if (attempt === maxAttempts) {
         throw new GroqServiceError(message);
       }
 
@@ -209,10 +245,10 @@ Requirements:
     }
   }
 
-  private async isDuplicateAgainstRecent(text: string, platform: string): Promise<boolean> {
+  private async isDuplicateAgainstRecent(text: string, platform: string, threshold = 0.7): Promise<boolean> {
     const recentPosts = await this.postRepository.findRecentPostsByPlatform(platform, 20);
     return recentPosts.some(
-      (post) => calculateTextSimilarity(post.content, text) >= 0.7,
+      (post) => calculateTextSimilarity(post.content, text) >= threshold,
     );
   }
 

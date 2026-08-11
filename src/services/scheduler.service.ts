@@ -225,7 +225,7 @@ export class SchedulerService {
     heroArt: Buffer,
   ): Promise<void> {
     try {
-      const variant = await this.groqService.generateTwitterVariant(theme.label, content.caption);
+      const variant = await this.groqService.generateTwitterVariant(theme.label, content.caption, content.hashtags);
       const imageUrl = await this.tryGenerateImage(
         content,
         theme,
