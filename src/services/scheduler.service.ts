@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import { appLogger } from '../config/logger.js';
 import { env, isCloudinaryConfigured } from '../config/env.js';
 import { ContentTheme, pickWeightedTheme } from '../config/content-themes.js';
-import { LayoutId, pickLayout } from '../config/layouts.js';
+import type { LayoutId } from '../config/layouts.js';
 import type { ThemedPostPayload, PostType } from './gemini.service.js';
 import { GroqService } from './groq.service.js';
 import { BufferService } from './buffer.service.js';
@@ -61,12 +61,14 @@ export class SchedulerService {
 
     const postType = resolvePostType(new Date());
 
-    const [recentThemeIds, recentLayoutIds] = await Promise.all([
-      this.postRepository.getRecentlyUsedThemeIds(),
-      this.postRepository.getRecentlyUsedLayoutIds(),
-    ]);
+    const recentThemeIds = await this.postRepository.getRecentlyUsedThemeIds();
     const theme = pickWeightedTheme(recentThemeIds);
-    const layout = pickLayout(recentLayoutIds);
+    /**
+     * Locked to "split" per user request - every scheduled post should match
+     * the image-left/content-right layout used in the last pre-automation
+     * run, rather than rotating across all 4 layouts.
+     */
+    const layout: LayoutId = 'split';
 
     let content: ThemedPostPayload;
 
