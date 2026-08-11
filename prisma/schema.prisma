@@ -19,6 +19,8 @@ model Post {
   bufferPostId   String?
   status         String   @default("draft")
   duplicateScore Float?
+  contentTheme   String?
+  layout         String?
   topicId        Int?
   topic          Topic?   @relation(fields: [topicId], references: [id])
   logs           Log[]

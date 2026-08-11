@@ -1,132 +1,168 @@
 import cron from 'node-cron';
 import { appLogger } from '../config/logger.js';
 import { env, isCloudinaryConfigured } from '../config/env.js';
-import { IMAGE_DIMENSIONS, SERVICE_TOPICS } from '../config/brand.js';
-import { GeminiService, GeneratedPostPayload, PostType } from './gemini.service.js';
+import { ContentTheme, pickWeightedTheme } from '../config/content-themes.js';
+import { LayoutId, pickLayout } from '../config/layouts.js';
+import type { ThemedPostPayload, PostType } from './gemini.service.js';
+import { GroqService } from './groq.service.js';
 import { BufferService } from './buffer.service.js';
 import { CloudinaryService } from './cloudinary.service.js';
-import { PollinationsService } from './pollinations.service.js';
+import { TemplateService } from './template.service.js';
+import { OpenAiService } from './openai.service.js';
+import { PexelsService } from './pexels.service.js';
+import { isPexelsConfigured } from '../config/env.js';
+import type { BufferChannelService } from './buffer.service.js';
 import type { PostRepository } from '../repositories/post.repository.js';
 
-const SLOTS: { type: PostType; time: string }[] = [
-  { type: 'morning', time: '09:00' },
-  { type: 'afternoon', time: '14:00' },
-  { type: 'evening', time: '19:00' },
-];
+const SCHEDULE_OFFSET_MINUTES = 5;
+const IST_OFFSET_MS = (5 * 60 + 30) * 60_000;
+
+/** Cosmetic label only (see GroqService.generateThemedPost) - content generation is theme-driven, not daypart-driven. */
+function resolvePostType(referenceInstant: Date): PostType {
+  const istHour = new Date(referenceInstant.getTime() + IST_OFFSET_MS).getUTCHours();
+  if (istHour < 12) return 'morning';
+  if (istHour < 17) return 'afternoon';
+  return 'evening';
+}
 
 export class SchedulerService {
   constructor(
-    private readonly geminiService: GeminiService,
+    private readonly groqService: GroqService,
     private readonly bufferService: BufferService,
     private readonly cloudinaryService: CloudinaryService,
-    private readonly pollinationsService: PollinationsService,
+    private readonly templateService: TemplateService,
+    private readonly openAiService: OpenAiService,
+    private readonly pexelsService: PexelsService,
     private readonly postRepository: PostRepository,
   ) {}
 
   start() {
     cron.schedule(
-      '0 7 * * *',
+      '0 * * * *',
       async () => {
-        await this.runDailyAutomation();
+        await this.runHourlyAutomation();
       },
       {
         timezone: env.TIMEZONE,
       },
     );
 
-    appLogger.info('Scheduler started', { timezone: env.TIMEZONE });
-  }
-
-  async runDailyAutomation() {
-    appLogger.info('Daily automation run started');
-    await this.postRepository.ensureSeedTopics(SERVICE_TOPICS.map((t) => t.name));
-
-    const scheduleStamp = new Date();
-
-    for (const slot of SLOTS) {
-      await this.runSlot(slot.type, slot.time, scheduleStamp);
-    }
-
-    appLogger.info('Daily automation run completed');
+    appLogger.info('Scheduler started', { timezone: env.TIMEZONE, cadence: 'hourly' });
   }
 
   /**
-   * One Alphazox service (round-robin, see PostRepository.getNextTopic) per
-   * slot, generated once as the LinkedIn post (including a shared image
-   * prompt), then rewritten per platform. LinkedIn/Twitter/Instagram are
-   * each wrapped in their own try/catch so one platform's failure never
-   * blocks the others.
+   * One theme (round-robin-ish, no immediate repeat - see content-themes.ts)
+   * and one hero image per run, shared across the LinkedIn/Twitter/
+   * Instagram cards so a single hourly run only costs one Groq text call
+   * and one OpenAI image call, not three of each.
    */
-  private async runSlot(postType: PostType, time: string, scheduleStamp: Date): Promise<void> {
-    const topicRecord = await this.postRepository.getNextTopic(SERVICE_TOPICS.map((t) => t.name));
-    const serviceTopic = SERVICE_TOPICS.find((t) => t.name === topicRecord.name);
+  async runHourlyAutomation(): Promise<void> {
+    appLogger.info('Hourly automation run started');
 
-    if (!serviceTopic) {
-      appLogger.error(
-        `Topic "${topicRecord.name}" has no matching service definition; skipping slot`,
-        {
-          postType,
-        },
-      );
-      return;
-    }
+    const postType = resolvePostType(new Date());
 
-    let linkedInPost: GeneratedPostPayload;
+    const [recentThemeIds, recentLayoutIds] = await Promise.all([
+      this.postRepository.getRecentlyUsedThemeIds(),
+      this.postRepository.getRecentlyUsedLayoutIds(),
+    ]);
+    const theme = pickWeightedTheme(recentThemeIds);
+    const layout = pickLayout(recentLayoutIds);
+
+    let content: ThemedPostPayload;
 
     try {
-      linkedInPost = await this.generateLinkedInForSlot(postType, serviceTopic);
+      content = await this.groqService.generateThemedPost(theme);
     } catch (error) {
-      appLogger.error(
-        `Failed to generate the source LinkedIn post for ${postType}; skipping slot`,
-        {
-          postType,
-          topic: serviceTopic.name,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      );
+      appLogger.error('Failed to generate themed content; skipping this hour\'s run', {
+        postType,
+        theme: theme.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
       return;
     }
 
-    const dueAt = this.buildScheduleDateString(scheduleStamp, time);
+    const dueAt = this.buildScheduleDateString();
+    const heroArt = await this.tryGenerateThemedSceneArt(theme, content);
 
-    await this.scheduleLinkedIn(linkedInPost, topicRecord.id, dueAt);
-    await this.scheduleTwitter(linkedInPost, topicRecord.id, dueAt);
-    await this.scheduleInstagram(linkedInPost, topicRecord.id, dueAt);
+    if (!heroArt) {
+      appLogger.error('Skipping this hour\'s run: hero art generation failed', {
+        theme: theme.id,
+      });
+      return;
+    }
+
+    await this.scheduleLinkedIn(postType, theme, layout, content, dueAt, heroArt);
+    await this.scheduleTwitter(postType, theme, layout, content, dueAt, heroArt);
+    await this.scheduleInstagram(postType, theme, layout, content, dueAt, heroArt);
+
+    appLogger.info('Hourly automation run completed');
   }
 
-  private async generateLinkedInForSlot(
-    postType: PostType,
-    topic: (typeof SERVICE_TOPICS)[number],
-  ): Promise<GeneratedPostPayload> {
-    switch (postType) {
-      case 'morning':
-        return this.geminiService.generateMorningPost(topic);
-      case 'afternoon':
-        return this.geminiService.generateAfternoonPost(topic);
-      case 'evening':
-        return this.geminiService.generateEveningPost(topic);
+  /**
+   * OpenAI's bespoke art is tried first when available; Pexels real stock
+   * photography (see content-themes.ts imageKeywords) is the free fallback
+   * when OpenAI fails or isn't configured (billing, quota) - this is the
+   * default path right now since OpenAI billing is not being topped up.
+   */
+  private async tryGenerateThemedSceneArt(
+    theme: ContentTheme,
+    content: ThemedPostPayload,
+  ): Promise<Buffer | undefined> {
+    try {
+      return await this.openAiService.generateThemedSceneArt(
+        theme,
+        content.headline,
+        content.subheadline,
+        '1024x1536',
+      );
+    } catch (error) {
+      appLogger.warn('OpenAI themed scene art generation failed; falling back to Pexels', {
+        theme: theme.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    if (!isPexelsConfigured) {
+      appLogger.error('Pexels is not configured either; no hero art available', { theme: theme.id });
+      return undefined;
+    }
+
+    try {
+      return await this.pexelsService.searchPhoto(theme.imageKeywords, 'portrait');
+    } catch (error) {
+      appLogger.error('Pexels photo search failed', {
+        theme: theme.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
     }
   }
 
   /**
-   * Generates a platform-sized image from the shared imagePrompt. Returns
-   * undefined (rather than throwing) on failure or when Cloudinary isn't
-   * configured, so LinkedIn/Twitter callers can fall back to a text-only
-   * post instead of losing the whole slot over an image problem.
+   * Renders the themed card (logo, eyebrow, headline, hero art, slim footer
+   * - see template.service.ts renderThemedPost) at the given platform's
+   * dimensions and uploads it to Cloudinary. Instagram uploads as JPEG
+   * (Buffer's Instagram publish path has been unreliable with PNG assets);
+   * other platforms keep PNG. Returns undefined on failure so LinkedIn/
+   * Twitter callers can fall back to a text-only post instead of losing the
+   * whole slot over an image problem.
    */
   private async tryGenerateImage(
-    imagePrompt: string,
-    platform: keyof typeof IMAGE_DIMENSIONS,
+    content: ThemedPostPayload,
+    theme: ContentTheme,
+    layout: LayoutId,
+    platform: BufferChannelService,
     label: string,
+    heroArt: Buffer,
   ): Promise<string | undefined> {
     if (!isCloudinaryConfigured) {
       return undefined;
     }
 
     try {
-      const { width, height } = IMAGE_DIMENSIONS[platform];
-      const imageBuffer = await this.pollinationsService.generateImage(imagePrompt, width, height);
-      return await this.cloudinaryService.uploadImage(imageBuffer, `${label}-${Date.now()}`);
+      const imageBuffer = await this.templateService.renderThemedPost(content, theme, platform, heroArt, layout);
+      const format = platform === 'instagram' ? 'jpg' : 'png';
+      return await this.cloudinaryService.uploadImage(imageBuffer, `${label}-${Date.now()}`, format);
     } catch (error) {
       appLogger.error(`Image generation failed for ${label}; continuing without an image`, {
         error: error instanceof Error ? error.message : String(error),
@@ -136,62 +172,77 @@ export class SchedulerService {
   }
 
   private async scheduleLinkedIn(
-    post: GeneratedPostPayload,
-    topicId: number,
+    postType: PostType,
+    theme: ContentTheme,
+    layout: LayoutId,
+    content: ThemedPostPayload,
     dueAt: string,
+    heroArt: Buffer,
   ): Promise<void> {
     try {
       const imageUrl = await this.tryGenerateImage(
-        post.imagePrompt,
+        content,
+        theme,
+        layout,
         'linkedin',
-        `${post.type}-linkedin`,
+        `${postType}-linkedin-${theme.id}`,
+        heroArt,
       );
 
       const saved = await this.postRepository.savePost({
-        type: post.type,
+        type: postType,
         platform: 'linkedin',
-        content: post.content,
-        hashtags: post.hashtags,
+        content: content.caption,
+        hashtags: content.hashtags,
         status: 'scheduled',
-        topicId,
+        contentTheme: theme.id,
+        layout,
         imageUrl,
       });
 
       await this.bufferService.schedulePost({
         postId: saved.id,
-        text: `${post.content}\n\n${post.hashtags}`,
+        text: `${content.caption}\n\n${content.hashtags}`,
         scheduledAt: dueAt,
         service: 'linkedin',
         imageUrl,
       });
     } catch (error) {
       appLogger.error('LinkedIn scheduling failed for this slot', {
-        postType: post.type,
+        postType,
+        theme: theme.id,
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
   private async scheduleTwitter(
-    post: GeneratedPostPayload,
-    topicId: number,
+    postType: PostType,
+    theme: ContentTheme,
+    layout: LayoutId,
+    content: ThemedPostPayload,
     dueAt: string,
+    heroArt: Buffer,
   ): Promise<void> {
     try {
-      const variant = await this.geminiService.generateTwitterVariant(post.topic, post.content);
+      const variant = await this.groqService.generateTwitterVariant(theme.label, content.caption);
       const imageUrl = await this.tryGenerateImage(
-        post.imagePrompt,
+        content,
+        theme,
+        layout,
         'twitter',
-        `${post.type}-twitter`,
+        `${postType}-twitter-${theme.id}`,
+        heroArt,
       );
 
       const saved = await this.postRepository.savePost({
-        type: post.type,
+        type: postType,
         platform: 'twitter',
         content: variant.content,
         hashtags: variant.hashtags,
         status: 'scheduled',
-        topicId,
+        contentTheme: theme.id,
+        layout,
         imageUrl,
       });
 
@@ -204,82 +255,74 @@ export class SchedulerService {
       });
     } catch (error) {
       appLogger.error('Twitter scheduling failed for this slot', {
-        postType: post.type,
+        postType,
+        theme: theme.id,
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
   private async scheduleInstagram(
-    post: GeneratedPostPayload,
-    topicId: number,
+    postType: PostType,
+    theme: ContentTheme,
+    layout: LayoutId,
+    content: ThemedPostPayload,
     dueAt: string,
+    heroArt: Buffer,
   ): Promise<void> {
     if (!isCloudinaryConfigured) {
-      appLogger.info('Skipping Instagram: Cloudinary is not configured', { postType: post.type });
+      appLogger.info('Skipping Instagram: Cloudinary is not configured', { postType });
       return;
     }
 
     try {
-      const variant = await this.geminiService.generateInstagramVariant(post.topic, post.content);
-      const { width, height } = IMAGE_DIMENSIONS.instagram;
-      const imageBuffer = await this.pollinationsService.generateImage(
-        post.imagePrompt,
-        width,
-        height,
-      );
-      const imageUrl = await this.cloudinaryService.uploadImage(
-        imageBuffer,
-        `${post.type}-instagram-${Date.now()}`,
+      const imageUrl = await this.tryGenerateImage(
+        content,
+        theme,
+        layout,
+        'instagram',
+        `${postType}-instagram-${theme.id}`,
+        heroArt,
       );
 
+      if (!imageUrl) {
+        appLogger.error('Skipping Instagram: image rendering failed', { postType });
+        return;
+      }
+
       const saved = await this.postRepository.savePost({
-        type: post.type,
+        type: postType,
         platform: 'instagram',
-        content: variant.caption,
-        hashtags: variant.hashtags,
+        content: content.caption,
+        hashtags: content.hashtags,
         status: 'scheduled',
-        topicId,
+        contentTheme: theme.id,
+        layout,
         imageUrl,
       });
 
       await this.bufferService.schedulePost({
         postId: saved.id,
-        text: `${variant.caption}\n\n${variant.hashtags}`,
+        text: `${content.caption}\n\n${content.hashtags}`,
         scheduledAt: dueAt,
         service: 'instagram',
         imageUrl,
       });
     } catch (error) {
       appLogger.error('Instagram scheduling failed for this slot', {
-        postType: post.type,
+        postType,
+        theme: theme.id,
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
   /**
-   * Builds a UTC ISO instant for a given wall-clock time in Asia/Kolkata, on
-   * the IST calendar date corresponding to `referenceInstant`. Uses a fixed
-   * +05:30 offset rather than the host machine's local timezone (which is
-   * UTC on most servers/containers) — Asia/Kolkata has no DST, so this is
-   * exact. If TIMEZONE is ever changed to a DST-observing zone, this needs
-   * to be replaced with a real IANA timezone conversion.
+   * A few minutes out from "now" rather than a fixed wall-clock time -
+   * Buffer rejects scheduledAt values that aren't in the future, and an
+   * hourly run's "now" varies with cron/CI trigger jitter.
    */
-  private buildScheduleDateString(referenceInstant: Date, time: string): string {
-    const [hoursPart, minutesPart] = time.split(':');
-    const hours = Number(hoursPart ?? 0);
-    const minutes = Number(minutesPart ?? 0);
-
-    const IST_OFFSET_MS = (5 * 60 + 30) * 60_000;
-    const istShifted = new Date(referenceInstant.getTime() + IST_OFFSET_MS);
-    const year = istShifted.getUTCFullYear();
-    const month = istShifted.getUTCMonth() + 1;
-    const day = istShifted.getUTCDate();
-    const pad = (n: number): string => String(n).padStart(2, '0');
-
-    return new Date(
-      `${year}-${pad(month)}-${pad(day)}T${pad(hours)}:${pad(minutes)}:00+05:30`,
-    ).toISOString();
+  private buildScheduleDateString(): string {
+    return new Date(Date.now() + SCHEDULE_OFFSET_MINUTES * 60_000).toISOString();
   }
 }

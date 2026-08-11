@@ -6,8 +6,8 @@ async function main(): Promise<void> {
 
   try {
     await prisma.$connect();
-    appLogger.info('generate-and-schedule: starting one-shot daily automation run');
-    await schedulerService.runDailyAutomation();
+    appLogger.info('generate-and-schedule: starting one-shot hourly automation run');
+    await schedulerService.runHourlyAutomation();
     appLogger.info('generate-and-schedule: run completed successfully');
     process.exitCode = 0;
   } catch (error) {

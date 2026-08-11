@@ -10,6 +10,8 @@ export class PostRepository {
     hashtags: string;
     status: string;
     topicId?: number | null;
+    contentTheme?: string | null;
+    layout?: string | null;
     published?: boolean;
     bufferPostId?: string | null;
     imageUrl?: string | null;
@@ -24,9 +26,57 @@ export class PostRepository {
         published: input.published ?? false,
         bufferPostId: input.bufferPostId ?? null,
         topicId: input.topicId ?? null,
+        contentTheme: input.contentTheme ?? null,
+        layout: input.layout ?? null,
         imageUrl: input.imageUrl ?? null,
       },
     });
+  }
+
+  /** Most recent content theme used (any platform), so callers can avoid picking the same theme twice in a row. */
+  async getLastUsedThemeId(): Promise<string | null> {
+    const last = await this.prisma.post.findFirst({
+      where: { contentTheme: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { contentTheme: true },
+    });
+    return last?.contentTheme ?? null;
+  }
+
+  /** Most recent layout used (any platform), so callers can avoid picking the same layout twice in a row. */
+  async getLastUsedLayoutId(): Promise<string | null> {
+    const last = await this.prisma.post.findFirst({
+      where: { layout: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      select: { layout: true },
+    });
+    return last?.layout ?? null;
+  }
+
+  /**
+   * Distinct content themes used across the last `postLimit` posts (any
+   * platform), so callers can avoid repeating a theme within a whole batch
+   * of posts, not just the single immediately-preceding one.
+   */
+  async getRecentlyUsedThemeIds(postLimit = 15): Promise<string[]> {
+    const recent = await this.prisma.post.findMany({
+      where: { contentTheme: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      take: postLimit,
+      select: { contentTheme: true },
+    });
+    return [...new Set(recent.map((p) => p.contentTheme).filter((t): t is string => t !== null))];
+  }
+
+  /** Same as getRecentlyUsedThemeIds() but for layouts (only 4 layouts exist, so a smaller window). */
+  async getRecentlyUsedLayoutIds(postLimit = 2): Promise<string[]> {
+    const recent = await this.prisma.post.findMany({
+      where: { layout: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      take: postLimit,
+      select: { layout: true },
+    });
+    return [...new Set(recent.map((p) => p.layout).filter((l): l is string => l !== null))];
   }
 
   async findRecentPostsByPlatform(platform: string, limit = 20) {

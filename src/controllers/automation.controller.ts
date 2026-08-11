@@ -11,8 +11,8 @@ export class AutomationController {
   async triggerRun(req: Request, res: Response) {
     try {
       TriggerRunSchema.parse(req.body ?? {});
-      await this.schedulerService.runDailyAutomation();
-      sendSuccess(res, { triggered: true }, 'Daily automation completed');
+      await this.schedulerService.runHourlyAutomation();
+      sendSuccess(res, { triggered: true }, 'Hourly automation completed');
     } catch (error) {
       sendError(res, 500, error instanceof Error ? error.message : 'Unknown error');
     }

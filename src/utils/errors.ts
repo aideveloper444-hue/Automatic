@@ -21,3 +21,15 @@ export class BufferServiceError extends AppError {
     super(`Buffer service error: ${message}`, 502);
   }
 }
+
+export class OpenAiServiceError extends AppError {
+  constructor(message: string) {
+    super(`OpenAI service error: ${message}`, 502);
+  }
+}
+
+export class GroqServiceError extends AppError {
+  constructor(message: string) {
+    super(`Groq service error: ${message}`, 502);
+  }
+}

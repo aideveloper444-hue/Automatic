@@ -18,7 +18,19 @@ export class CloudinaryService {
    * params-to-sign + api secret) so no SDK dependency is needed - only
    * axios (already a dependency) and Node's built-in crypto module.
    */
-  async uploadImage(imageBuffer: Buffer, publicIdHint: string): Promise<string> {
+  /**
+   * `format` controls the delivered file type (independent of the source
+   * buffer, which is always PNG from Resvg) - Cloudinary transcodes on
+   * upload. Instagram callers should pass 'jpg': Buffer's Instagram publish
+   * path is unreliable with PNG assets and has been observed to silently
+   * drop the post (accepted at createPost, gone from the queue moments
+   * later) rather than surface a clear error.
+   */
+  async uploadImage(
+    imageBuffer: Buffer,
+    publicIdHint: string,
+    format: 'png' | 'jpg' = 'png',
+  ): Promise<string> {
     if (!isCloudinaryConfigured) {
       throw new CloudinaryUploadError(
         'Cloudinary is not configured (CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET)',
@@ -27,11 +39,11 @@ export class CloudinaryService {
 
     return retryWithBackoff(
       async (attempt) => {
-        appLogger.info('Uploading image to Cloudinary', { attempt, publicIdHint });
+        appLogger.info('Uploading image to Cloudinary', { attempt, publicIdHint, format });
 
         const timestamp = Math.floor(Date.now() / 1000);
         const publicId = `buffer-ai-content-automation/${publicIdHint}`;
-        const paramsToSign = `public_id=${publicId}&timestamp=${timestamp}`;
+        const paramsToSign = `format=${format}&public_id=${publicId}&timestamp=${timestamp}`;
         const signature = createHash('sha1')
           .update(`${paramsToSign}${env.CLOUDINARY_API_SECRET}`)
           .digest('hex');
@@ -42,6 +54,7 @@ export class CloudinaryService {
           file: dataUri,
           public_id: publicId,
           timestamp: String(timestamp),
+          format,
           api_key: env.CLOUDINARY_API_KEY ?? '',
           signature,
         });

@@ -1,23 +1,23 @@
-name: Daily Buffer Automation
+name: Hourly Buffer Automation
 
-# Runs fully unattended, once a day, with zero manual intervention.
-#
-# Timing: 07:00 in Asia/Kolkata (IST, UTC+5:30) == 01:30 UTC.
+# Runs fully unattended, once every hour, with zero manual intervention.
+# Each run generates one theme + one hero image and schedules it across
+# LinkedIn, Twitter, and Instagram (see SchedulerService.runHourlyAutomation).
 #
 # Persistence note: GitHub-hosted runners are ephemeral, so the default
 # SQLite database file does not survive between runs on its own. This
 # workflow caches prisma/data/dev.db between runs as a best-effort way to
-# keep post history (needed for duplicate detection) across days. For a
+# keep post history (needed for duplicate detection) across runs. For a
 # production deployment, prefer setting DATABASE_URL to a persistent
 # PostgreSQL instance (see README "Switching to PostgreSQL") — that removes
 # any dependency on the cache and is the recommended production setup.
 on:
   schedule:
-    - cron: '30 1 * * *'
+    - cron: '0 * * * *'
   workflow_dispatch: {}
 
 concurrency:
-  group: daily-buffer-automation
+  group: hourly-buffer-automation
   cancel-in-progress: false
 
 jobs:
@@ -57,13 +57,16 @@ jobs:
       - name: Sync database schema
         run: npx prisma db push --skip-generate
 
-      - name: Generate and schedule today's posts
+      - name: Generate and schedule this hour's post
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
           CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
           CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
           CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PORT: 3000
           TIMEZONE: Asia/Kolkata
-        run: npm run generate:daily
+        run: npm run generate:hourly

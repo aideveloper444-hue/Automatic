@@ -8,8 +8,10 @@ import { BRAND, ServiceTopic } from '../config/brand.js';
 import {
   GeneratedPostSchema,
   InstagramVariantSchema,
+  ThemedPostSchema,
   TwitterVariantSchema,
 } from '../validation/content.schema.js';
+import type { ContentTheme } from '../config/content-themes.js';
 import type { PostRepository } from '../repositories/post.repository.js';
 
 export type PostType = 'morning' | 'afternoon' | 'evening';
@@ -19,7 +21,13 @@ export interface GeneratedPostPayload {
   topic: string;
   content: string;
   hashtags: string;
-  imagePrompt: string;
+}
+
+export interface ThemedPostPayload {
+  headline: string[];
+  subheadline: string;
+  caption: string;
+  hashtags: string;
 }
 
 export interface TwitterVariantPayload {
@@ -84,16 +92,10 @@ Requirements:
 - End with a CTA that invites the reader to reach out to ${BRAND.name} at ${BRAND.supportEmail}.
 - Tone should be polished, original, and distinctive - written as ${BRAND.name}, not generically.
 - Keep the content between 180 and 300 words.
-- Output JSON only with keys: content, hashtags, imagePrompt.
+- Output JSON only with keys: content, hashtags.
 - "hashtags" MUST be a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT}
   relevant hashtags (e.g. "#CloudNative #DevOps #Kubernetes #Alphazox"), NOT a JSON array, not
   more and not fewer than ${REQUIRED_HASHTAG_COUNT}.
-- imagePrompt: a vivid, concrete visual description for an AI image generator that represents
-  this post's idea, matching this exact visual style: ${BRAND.imageStyle}. This same image will
-  be used (resized) across LinkedIn, Twitter, and Instagram for this post, so keep the described
-  composition centered and reasonably square/flexible rather than relying on extreme wide or
-  tall framing. The described image must contain NO readable text, words, or letters in it -
-  describe only visual elements, style, mood, and composition.
 - Ensure the content is uniquely phrased and not generic.`;
   }
 
@@ -132,7 +134,7 @@ Requirements:
         continue;
       }
 
-      const { content, hashtags, imagePrompt } = validation.data;
+      const { content, hashtags } = validation.data;
 
       if (countHashtags(hashtags) !== REQUIRED_HASHTAG_COUNT) {
         appLogger.warn('LinkedIn post did not have exactly the required hashtag count', {
@@ -149,7 +151,7 @@ Requirements:
         continue;
       }
 
-      return { type: postType, topic: topic.name, content, hashtags, imagePrompt };
+      return { type: postType, topic: topic.name, content, hashtags };
     }
 
     throw new GeminiServiceError(
@@ -280,6 +282,77 @@ Requirements:
     }
 
     throw new GeminiServiceError('Unable to generate a unique Instagram post after retries');
+  }
+
+  private buildThemedPrompt(theme: ContentTheme): string {
+    return `You are the social media content director for ${BRAND.name}, a ${BRAND.tagline} (${BRAND.website}).
+
+Write ONE Instagram/LinkedIn post for the content theme "${theme.label}".
+
+Theme instructions: ${theme.guidance}
+
+Content rules:
+- This must read as genuinely educational/engaging content, not an advertisement - UNLESS the theme is
+  specifically "Alphazox Brand Story", which is the only theme allowed to be promotional.
+- Never invent or approximate statistics, customer counts, revenue, awards, certifications, or
+  partnerships. If you're not certain a specific number is accurate, do not include a number at all.
+- Do not give harmful, exploit, or attack-execution instructions under any theme.
+- Keep it concrete and specific - avoid generic filler like "unlock possibilities" or "drive growth."
+
+Output JSON only with keys: headline, subheadline, caption, hashtags.
+- "headline": an array of 1 to 3 very short punchy lines (each under 6 words) that work as large
+  display text on an image - this is the single main idea of the post, not a sentence.
+- "subheadline": one short supporting sentence (under 18 words) that adds context under the headline.
+- "caption": the full social caption, 80-150 words, engaging, ends with a soft call to action. Only
+  include "reach out to us at ${BRAND.supportEmail}" as the CTA if the theme is "Alphazox Brand Story" -
+  for all other themes end with something that invites discussion or reflection instead.
+- "hashtags": a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT} relevant hashtags,
+  NOT a JSON array.`;
+  }
+
+  async generateThemedPost(theme: ContentTheme): Promise<ThemedPostPayload> {
+    const prompt = this.buildThemedPrompt(theme);
+
+    for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
+      const rawText = await this.callGeminiApi(prompt, `Themed(${theme.id})`, attempt);
+
+      if (rawText === null) {
+        continue;
+      }
+
+      const validation = ThemedPostSchema.safeParse(this.safeParseJson(rawText));
+
+      if (!validation.success) {
+        appLogger.warn(`Gemini response failed schema validation for themed post`, {
+          theme: theme.id,
+          attempt,
+          issues: validation.error.issues.map((issue) => issue.message),
+        });
+        continue;
+      }
+
+      const { headline, subheadline, caption, hashtags } = validation.data;
+
+      if (countHashtags(hashtags) !== REQUIRED_HASHTAG_COUNT) {
+        appLogger.warn('Themed post did not have exactly the required hashtag count', {
+          theme: theme.id,
+          attempt,
+          count: countHashtags(hashtags),
+        });
+        continue;
+      }
+
+      if (await this.isDuplicateAgainstRecent(caption, 'instagram')) {
+        appLogger.info(`Duplicate detected for themed post (${theme.id}); regenerating content`, {
+          attempt,
+        });
+        continue;
+      }
+
+      return { headline, subheadline, caption, hashtags };
+    }
+
+    throw new GeminiServiceError(`Unable to generate a unique themed post (${theme.id}) after retries`);
   }
 
   private async callGeminiApi(

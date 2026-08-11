@@ -7,6 +7,7 @@ import { BufferServiceError } from '../utils/errors.js';
 import {
   BufferChannelsDataSchema,
   BufferCreatePostDataSchema,
+  BufferDeletePostDataSchema,
   BufferOrganizationsDataSchema,
   GraphQLEnvelopeSchema,
 } from '../validation/buffer.schema.js';
@@ -255,5 +256,41 @@ export class BufferService {
       });
       throw error instanceof BufferServiceError ? error : new BufferServiceError(message);
     }
+  }
+
+  /**
+   * Removes a post from Buffer's queue (works for both pending-approval and
+   * already-scheduled posts). `bufferPostId` is the id returned by
+   * schedulePost() - for a post that went to multiple channels this is a
+   * comma-joined list, so callers should delete each id individually.
+   */
+  async deletePost(bufferPostId: string): Promise<void> {
+    await retryWithBackoff(
+      async (attempt) => {
+        appLogger.info('Deleting post from Buffer', { bufferPostId, attempt });
+
+        const data = await this.graphqlRequest(
+          `mutation DeletePost($input: DeletePostInput!) {
+            deletePost(input: $input) {
+              __typename
+              ... on DeletePostSuccess { id }
+              ... on VoidMutationError { message }
+            }
+          }`,
+          BufferDeletePostDataSchema,
+          `deletePost(${bufferPostId})`,
+          { input: { id: bufferPostId } },
+        );
+
+        if (data.deletePost.__typename !== 'DeletePostSuccess') {
+          throw new BufferServiceError(
+            data.deletePost.message ?? `Buffer deletePost returned ${data.deletePost.__typename}`,
+          );
+        }
+
+        appLogger.info('Deleted post from Buffer', { bufferPostId });
+      },
+      { retries: 3, delayMs: 1000, label: `Buffer deletePost(${bufferPostId})` },
+    );
   }
 }

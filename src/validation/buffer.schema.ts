@@ -50,4 +50,15 @@ export const BufferCreatePostDataSchema = z.object({
   }),
 });
 
+// deletePost resolves to the DeletePostPayload union: DeletePostSuccess on
+// success, or VoidMutationError with a message. Same branch-on-whichever-
+// came-back pattern as BufferCreatePostDataSchema above.
+export const BufferDeletePostDataSchema = z.object({
+  deletePost: z.object({
+    __typename: z.string(),
+    id: z.string().min(1).optional(),
+    message: z.string().optional(),
+  }),
+});
+
 export type BufferChannel = z.infer<typeof BufferChannelSchema>;

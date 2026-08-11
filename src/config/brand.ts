@@ -3,12 +3,6 @@ export const BRAND = {
   tagline: 'Digital Transformation Partner',
   website: 'www.alphazox.com',
   supportEmail: 'support@alphazox.com',
-  // Visual style shared across Alphazox's own marketing graphics: dark
-  // navy/near-black backgrounds, glowing cyan-blue accent lighting,
-  // minimalist isometric 3D tech illustrations, glass/metallic textures,
-  // professional enterprise SaaS aesthetic.
-  imageStyle:
-    'dark navy or near-black background, glowing cyan-blue neon accent lighting, minimalist isometric 3D tech illustration style, glass and brushed-metal textures, clean professional enterprise SaaS aesthetic, high-quality 3D render, no readable text or logos anywhere in the image',
 };
 
 /**
@@ -19,7 +13,9 @@ export const BRAND = {
 export const IMAGE_DIMENSIONS = {
   linkedin: { width: 1200, height: 627 },
   twitter: { width: 1200, height: 675 },
-  instagram: { width: 1080, height: 1080 },
+  // 4:5 - Instagram's recommended portrait feed ratio (more vertical space
+  // than 1:1, no cropping in-feed), see [[content_theme_pipeline]].
+  instagram: { width: 1080, height: 1350 },
 } as const;
 
 export interface ServiceTopic {
