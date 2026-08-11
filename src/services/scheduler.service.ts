@@ -278,6 +278,13 @@ export class SchedulerService {
     }
 
     try {
+      const variant = await this.groqService.generateInstagramVariant(
+        theme.label,
+        content.caption,
+        content.caption,
+        content.hashtags,
+      );
+
       const imageUrl = await this.tryGenerateImage(
         content,
         theme,
@@ -295,8 +302,8 @@ export class SchedulerService {
       const saved = await this.postRepository.savePost({
         type: postType,
         platform: 'instagram',
-        content: content.caption,
-        hashtags: content.hashtags,
+        content: variant.caption,
+        hashtags: variant.hashtags,
         status: 'scheduled',
         contentTheme: theme.id,
         layout,
@@ -305,7 +312,7 @@ export class SchedulerService {
 
       await this.bufferService.schedulePost({
         postId: saved.id,
-        text: `${content.caption}\n\n${content.hashtags}`,
+        text: `${variant.caption}\n\n${variant.hashtags}`,
         scheduledAt: dueAt,
         service: 'instagram',
         imageUrl,

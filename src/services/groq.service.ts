@@ -5,10 +5,10 @@ import { appLogger } from '../config/logger.js';
 import { calculateTextSimilarity } from '../utils/similarity.js';
 import { GroqServiceError } from '../utils/errors.js';
 import { BRAND } from '../config/brand.js';
-import { ThemedPostSchema, TwitterVariantSchema } from '../validation/content.schema.js';
+import { InstagramVariantSchema, ThemedPostSchema, TwitterVariantSchema } from '../validation/content.schema.js';
 import type { ContentTheme } from '../config/content-themes.js';
 import type { PostRepository } from '../repositories/post.repository.js';
-import type { ThemedPostPayload, TwitterVariantPayload } from './gemini.service.js';
+import type { InstagramVariantPayload, ThemedPostPayload, TwitterVariantPayload } from './gemini.service.js';
 
 const MAX_GENERATION_ATTEMPTS = 3;
 const TWITTER_MAX_GENERATION_ATTEMPTS = 5;
@@ -109,7 +109,7 @@ Output JSON only with keys: headline, subheadline, caption, hashtags.
         continue;
       }
 
-      if (await this.isDuplicateAgainstRecent(caption, 'instagram')) {
+      if (await this.isDuplicateAgainstRecent(caption, 'linkedin')) {
         appLogger.info(`Duplicate detected for themed post (${theme.id}); regenerating content`, { attempt });
         continue;
       }
@@ -118,6 +118,78 @@ Output JSON only with keys: headline, subheadline, caption, hashtags.
     }
 
     throw new GroqServiceError(`Unable to generate a unique themed post (${theme.id}) after retries`);
+  }
+
+  /**
+   * Instagram used to reuse the LinkedIn caption verbatim - same words posted
+   * to two platforms every hour. This rewrites it into its own caption (like
+   * generateTwitterVariant does for Twitter) so all three platforms carry
+   * distinct wording.
+   */
+  async generateInstagramVariant(
+    topic: string,
+    sourceContent: string,
+    fallbackCaption: string,
+    fallbackHashtags: string,
+  ): Promise<InstagramVariantPayload> {
+    const prompt = `Rewrite the following idea as a fresh Instagram caption, for
+${BRAND.name} (${BRAND.tagline}).
+Idea/topic: ${topic}
+Source post (for context only, rewrite in your own words, do not copy sentences from it):
+"""
+${sourceContent}
+"""
+Requirements:
+- 100-150 words, engaging, tasteful use of emojis, ends with something that invites discussion or
+  reflection (a question or prompt) - not a hard sales pitch.
+- Punchy, original phrasing - genuinely different wording and structure from the source post, not a
+  light edit of it.
+- Output JSON only with keys: caption, hashtags.
+- "hashtags" MUST be a single space-separated string of EXACTLY ${REQUIRED_HASHTAG_COUNT} relevant
+  hashtags, NOT a JSON array.`;
+
+    for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt += 1) {
+      const rawText = await this.callGroqApi(prompt, 'Instagram', attempt);
+
+      if (rawText === null) {
+        continue;
+      }
+
+      const validation = InstagramVariantSchema.safeParse(this.safeParseJson(rawText));
+
+      if (!validation.success) {
+        appLogger.warn('Groq response failed schema validation for Instagram variant', {
+          attempt,
+          issues: validation.error.issues.map((issue) => issue.message),
+        });
+        continue;
+      }
+
+      const { caption, hashtags } = validation.data;
+
+      if (countHashtags(hashtags) !== REQUIRED_HASHTAG_COUNT) {
+        appLogger.warn('Instagram variant did not have exactly the required hashtag count', {
+          attempt,
+          count: countHashtags(hashtags),
+        });
+        continue;
+      }
+
+      if (
+        (await this.isDuplicateAgainstRecent(caption, 'instagram')) ||
+        calculateTextSimilarity(caption, sourceContent) >= 0.7
+      ) {
+        appLogger.info('Duplicate detected for Instagram variant; regenerating content', { attempt });
+        continue;
+      }
+
+      return { caption, hashtags };
+    }
+
+    appLogger.warn(
+      'Unable to generate a unique Instagram caption after retries; falling back to the LinkedIn caption',
+    );
+    return { caption: fallbackCaption, hashtags: fallbackHashtags };
   }
 
   async generateTwitterVariant(
