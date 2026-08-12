@@ -17,6 +17,11 @@ on:
   # observed being delayed/dropped when aligned to :00 (see
   # https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule).
   # Minute :07 avoids that congestion while still giving an exact hourly cadence.
+  #
+  # GitHub Actions `schedule` cron always runs in UTC (no per-workflow
+  # timezone support) - it fires at :07 UTC every hour, which is :37 IST
+  # (Asia/Kolkata, UTC+5:30). The pipeline's own content/logging still uses
+  # IST for "morning/afternoon/evening" labeling via TIMEZONE below.
   schedule:
     - cron: '7 * * * *'
   workflow_dispatch: {}
