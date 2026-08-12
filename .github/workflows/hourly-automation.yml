@@ -1,6 +1,6 @@
 name: Hourly Buffer Automation
 
-# Runs fully unattended, every 20 minutes, with zero manual intervention.
+# Runs fully unattended, once an hour, with zero manual intervention.
 # Each run generates one theme + one hero image and schedules it across
 # LinkedIn, Twitter, and Instagram (see SchedulerService.runHourlyAutomation).
 #
@@ -12,16 +12,13 @@ name: Hourly Buffer Automation
 # PostgreSQL instance (see README "Switching to PostgreSQL") — that removes
 # any dependency on the cache and is the recommended production setup.
 on:
-  # Deliberately not "0,20,40 * * * *": GitHub Actions queues scheduled
-  # workflows against every other repo's top-of-hour jobs, and this repo's
-  # runs were observed being delayed/dropped almost every hour as a result
-  # when aligned to :00 (only 1 of ~7 windows actually fired as `schedule`
-  # before this change - see
+  # Deliberately not "0 * * * *": GitHub Actions queues scheduled workflows
+  # against every other repo's top-of-hour jobs, and this repo's runs were
+  # observed being delayed/dropped when aligned to :00 (see
   # https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#schedule).
-  # Off-the-hour minutes (:07/:27/:47) avoid that congestion while still
-  # giving an exact 20-minute cadence.
+  # Minute :07 avoids that congestion while still giving an exact hourly cadence.
   schedule:
-    - cron: '7,27,47 * * * *'
+    - cron: '7 * * * *'
   workflow_dispatch: {}
 
 concurrency:
