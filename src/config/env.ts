@@ -32,7 +32,7 @@ const envSchema = z.object({
   // Optional: text-generation alternative to Gemini (see services/groq.service.ts) -
   // Gemini's free tier caps at 20 requests/day, too small for this pipeline's cadence.
   GROQ_API_KEY: z.string().optional(),
-  GROQ_MODEL: z.string().default('llama-3.3-70b-versatile'),
+  GROQ_MODEL: z.string().default('openai/gpt-oss-120b'),
 });
 
 export const env = envSchema.parse(process.env);
