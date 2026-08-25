@@ -102,13 +102,17 @@ const GroqCompoundResponseSchema = z.object({
 const GroqJsonResponseSchema = GroqCompoundResponseSchema;
 
 /**
- * Live news discovery for the hourly ALPHAZOX pipeline. Gemini's "grounding
- * with Google Search" tool is the primary path since it's genuinely backed
- * by Google Search/News, not an approximation. Falls back to Groq's
- * `groq/compound` model (built-in web search, no separate API key needed)
- * if Gemini fails or its free-tier quota (20 requests/day) is exhausted
- * before this cadence's 24 runs/day - same primary+fallback resilience
- * pattern as OpenAI image generation -> Pexels elsewhere in this codebase.
+ * Live news discovery for the hourly ALPHAZOX pipeline. Groq's `groq/compound`
+ * model (built-in web search, already covered by the existing GROQ_API_KEY,
+ * no extra billing) is the primary path - at this project's ~1 search/hour
+ * cadence its free-tier limits are very unlikely to bind; the exhaustion
+ * seen during development came from dozens of rapid manual test calls in one
+ * session, not real usage. Gemini's "grounding with Google Search" tool -
+ * genuinely backed by Google Search/News, not an approximation - is a
+ * secondary path for whenever its account has billing enabled; until then it
+ * fails fast (free-tier quota or an account-level block) and this falls
+ * through to Groq, same primary+fallback resilience pattern as OpenAI image
+ * generation -> Pexels elsewhere in this codebase.
  *
  * Both paths return freeform grounded text (see buildSearchPrompt), which
  * is then structured into the NewsStory shape by one shared, non-search
@@ -123,14 +127,14 @@ export class NewsResearchService {
     let citation: { uri?: string; title?: string } | undefined;
 
     try {
+      rawText = await this.searchViaGroqCompound(prompt);
+    } catch (error) {
+      appLogger.warn('Groq compound web search failed; falling back to Gemini Google Search grounding', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       const result = await this.searchViaGemini(prompt);
       rawText = result.text;
       citation = result.citation;
-    } catch (error) {
-      appLogger.warn('Gemini news research failed; falling back to Groq compound web search', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      rawText = await this.searchViaGroqCompound(prompt);
     }
 
     const story = await this.extractStory(rawText);
