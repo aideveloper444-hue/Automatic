@@ -142,14 +142,20 @@ const GNewsResponseSchema = z.object({
 /**
  * Live news discovery for the hourly ALPHAZOX pipeline, in resilience order:
  *
- * 1. Groq's `groq/compound` model (built-in web search, already covered by
- *    the existing GROQ_API_KEY, no extra billing) - at this project's
- *    ~1 search/hour cadence its free-tier limits are very unlikely to bind;
- *    exhaustion seen during development came from dozens of rapid manual
- *    test calls in one session, not real usage.
- * 2. GNews (gnews.io) - a real news-search API returning actual articles
- *    rather than an LLM deciding whether/how to search, so it sidesteps
- *    Groq compound's failure mode entirely. Optional (GNEWS_API_KEY).
+ * 1. GNews (gnews.io) - a real news-search API returning actual articles
+ *    rather than an LLM deciding whether/how to search. Optional
+ *    (GNEWS_API_KEY), free tier comfortably covers this pipeline's cadence.
+ *    Tried first because it doesn't touch Groq's tokens-per-minute budget
+ *    for the search itself (only its own small selection call does),
+ *    leaving headroom for the much bigger drafting call downstream (see
+ *    GroqService.generateNewsPostBundle).
+ * 2. Groq's `groq/compound` model (built-in web search, already covered by
+ *    the existing GROQ_API_KEY, no extra billing) - in practice this has
+ *    413'd ("Request Entity Too Large", from its own search-tool fan-out)
+ *    on every real run so far, which is exactly why it's no longer first:
+ *    each failed attempt still reserves tokens against the account's 8000/
+ *    minute cap before falling through, starving the drafting call of
+ *    budget. Kept as a fallback in case GNews itself is ever unavailable.
  * 3. Gemini's "grounding with Google Search" tool - genuinely backed by
  *    Google Search/News, not an approximation - for whenever its account
  *    has billing enabled; until then it fails fast (free-tier quota or an
@@ -168,17 +174,13 @@ export class NewsResearchService {
   async researchLatestStory(recentHeadlines: string[]): Promise<NewsStory> {
     const prompt = buildSearchPrompt(recentHeadlines);
 
-    try {
-      const rawText = await this.searchViaGroqCompound(prompt);
-      const story = await this.extractStory(rawText);
-      appLogger.info('News research succeeded via Groq compound', { headline: story.headline });
-      return story;
-    } catch (error) {
-      appLogger.warn('Groq compound web search failed; falling back to GNews', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-
+    // GNews first: on every real run today, Groq compound has 413'd twice
+    // before falling through anyway, and each failed attempt still reserves
+    // tokens against this account's 8000/minute cap - starving the much
+    // bigger drafting call downstream (see generateNewsPostBundle) of budget
+    // and causing a 429 cascade there. GNews doesn't touch Groq's token
+    // budget for the search itself, only its own small selection call, so
+    // trying it first leaves far more headroom for drafting.
     if (isGNewsConfigured) {
       try {
         const articlesText = await this.fetchGNewsArticles();
@@ -186,10 +188,21 @@ export class NewsResearchService {
         appLogger.info('News research succeeded via GNews', { headline: story.headline });
         return story;
       } catch (error) {
-        appLogger.warn('GNews failed; falling back to Gemini Google Search grounding', {
+        appLogger.warn('GNews failed; falling back to Groq compound web search', {
           error: error instanceof Error ? error.message : String(error),
         });
       }
+    }
+
+    try {
+      const rawText = await this.searchViaGroqCompound(prompt);
+      const story = await this.extractStory(rawText);
+      appLogger.info('News research succeeded via Groq compound', { headline: story.headline });
+      return story;
+    } catch (error) {
+      appLogger.warn('Groq compound web search failed; falling back to Gemini Google Search grounding', {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     const { text, citation } = await this.searchViaGemini(prompt);
