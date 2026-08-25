@@ -6,6 +6,7 @@ import { calculateTextSimilarity } from '../utils/similarity.js';
 import { GroqServiceError } from '../utils/errors.js';
 import { BRAND } from '../config/brand.js';
 import { InstagramVariantSchema, ThemedPostSchema, TwitterVariantSchema } from '../validation/content.schema.js';
+import { NewsPostBundleSchema, type NewsPostBundle, type NewsStory } from '../validation/news.schema.js';
 import type { ContentTheme } from '../config/content-themes.js';
 import type { PostRepository } from '../repositories/post.repository.js';
 import type { InstagramVariantPayload, ThemedPostPayload, TwitterVariantPayload } from './gemini.service.js';
@@ -14,6 +15,13 @@ const MAX_GENERATION_ATTEMPTS = 3;
 const TWITTER_MAX_GENERATION_ATTEMPTS = 5;
 const TWITTER_CHAR_LIMIT = 280;
 const REQUIRED_HASHTAG_COUNT = 4;
+
+const NEWS_MAX_GENERATION_ATTEMPTS = 5;
+const NEWS_INSTAGRAM_WORD_RANGE = { min: 100, max: 200 };
+const NEWS_LINKEDIN_WORD_RANGE = { min: 180, max: 300 };
+const NEWS_INSTAGRAM_HASHTAG_RANGE = { min: 8, max: 15 };
+const NEWS_LINKEDIN_HASHTAG_RANGE = { min: 5, max: 8 };
+const NEWS_TWITTER_HASHTAG_RANGE = { min: 1, max: 3 };
 /**
  * Jaccard word-overlap similarity trips much more easily on short text than
  * on a full caption - two genuinely different ~30-word tweets about the same
@@ -39,6 +47,16 @@ function countHashtags(hashtags: string): number {
     .split(/\s+/)
     .map((token) => token.trim())
     .filter((token) => token.startsWith('#')).length;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function hasAlphazoxHashtag(hashtags: string): boolean {
+  return /#alphazox\b/i.test(hashtags);
 }
 
 /**
@@ -272,6 +290,169 @@ Requirements:
     return { content: trimmed, hashtags };
   }
 
+  private buildNewsPostPrompt(story: NewsStory, recentHeadlines: string[]): string {
+    const developingNote = story.isDeveloping
+      ? 'This story is still developing/unconfirmed in parts - clearly say so in every platform version (e.g. "this is a developing story").'
+      : '';
+    const marketNote = story.isMarketStory
+      ? 'This is a U.S. technology market story. In the LinkedIn version, clearly separate a "FACT:" line (only what happened) from an "ANALYSIS:" line (why it may be happening). Never recommend buying or selling, never present speculation as a guaranteed prediction.'
+      : '';
+    const avoidBlock =
+      recentHeadlines.length > 0
+        ? `\nAvoid reusing the opening sentence, angle, or hashtag set of these recent ALPHAZOX posts:\n${recentHeadlines.map((h) => `- ${h}`).join('\n')}\n`
+        : '';
+
+    return `You are the ALPHAZOX Technology Intelligence, Content & Social Media Engine. ALPHAZOX is an IT and
+digital transformation company (https://www.alphazox.com/).
+
+Today's selected story:
+Headline: ${story.headline}
+Category: ${story.category}
+Source: ${story.sourceName} (${story.sourceUrl})
+${story.summary}
+${developingNote}
+${marketNote}
+${avoidBlock}
+Write THREE distinct, platform-specific posts about this SAME story - do not copy the same text across
+platforms, each must be written fresh for its platform's audience and format. Go beyond summarizing: explain
+what happened, what technology is involved, why it matters, what it means for businesses/IT leaders, and what
+could happen next. Where it is genuinely, naturally relevant, connect the story to ALPHAZOX capabilities (AI/ML,
+Cloud, custom software development, DevOps, data science, RPA, cybersecurity, analytics, digital transformation,
+enterprise modernization, GCCs) - do not force a pitch into every post. Never invent facts or present rumor as
+confirmed.
+
+1. LINKEDIN (audience: CIOs, CTOs, CEOs, technology leaders, developers, enterprise decision-makers):
+   Structure: strong opening hook, what happened, why it matters, business/enterprise implications, ALPHAZOX
+   perspective, then a question to encourage discussion. MUST be at least ${NEWS_LINKEDIN_WORD_RANGE.min} words and
+   no more than ${NEWS_LINKEDIN_WORD_RANGE.max} - count as you write and expand the business/enterprise
+   implications section with concrete detail if you're at risk of finishing short. Authoritative, professional tone.
+
+2. INSTAGRAM (general engaged audience):
+   Structure: strong hook, what happened, why it matters, ALPHAZOX insight, engagement question/CTA. MUST be at
+   least ${NEWS_INSTAGRAM_WORD_RANGE.min} words and no more than ${NEWS_INSTAGRAM_WORD_RANGE.max} - count as you
+   write. Short paragraphs, emojis used sparingly
+   and professionally.
+
+3. X/TWITTER: The single most important fact plus a compelling hook and, when it fits, why it matters. Maximum
+   ${TWITTER_CHAR_LIMIT} characters TOTAL including hashtags. Concise and high-impact - this must be ONE post, not
+   a thread.
+
+Also write "cardHeadline" (an array of 1 to 3 very short punchy lines, each under 6 words, for large display text
+on an image - the single main idea, not a sentence) and "cardSubheadline" (one short supporting sentence, under 18
+words).
+
+Hashtag rules (apply to every platform): relevant, current, topic-specific, natural, dynamically chosen based on
+THIS story (e.g. an AI story might use #AI #ArtificialIntelligence #GenerativeAI #MachineLearning; a semiconductor
+story might use #Semiconductors #AIChips #ChipTechnology; a cybersecurity story might use #Cybersecurity
+#DataSecurity #ZeroTrust). Do not reuse the same generic hashtag block across posts. Only use a company hashtag
+(e.g. #Nvidia) if that company is genuinely central to the story. Always include #ALPHAZOX in every platform's
+hashtag list.
+- linkedin hashtags: EXACTLY ${NEWS_LINKEDIN_HASHTAG_RANGE.min} to ${NEWS_LINKEDIN_HASHTAG_RANGE.max} hashtags.
+- instagram hashtags: EXACTLY ${NEWS_INSTAGRAM_HASHTAG_RANGE.min} to ${NEWS_INSTAGRAM_HASHTAG_RANGE.max} hashtags.
+- twitter hashtags: EXACTLY ${NEWS_TWITTER_HASHTAG_RANGE.min} to ${NEWS_TWITTER_HASHTAG_RANGE.max} hashtags, and
+  they must fit within the ${TWITTER_CHAR_LIMIT}-character total limit above.
+
+Output JSON only, with this exact shape:
+{
+  "cardHeadline": ["...", "..."],
+  "cardSubheadline": "...",
+  "linkedin": { "content": "...", "hashtags": "#Tag1 #Tag2 ..." },
+  "instagram": { "caption": "...", "hashtags": "#Tag1 #Tag2 ..." },
+  "twitter": { "content": "...", "hashtags": "#Tag1 #Tag2 ..." }
+}
+Each "hashtags" value MUST be a single space-separated string, NOT a JSON array.`;
+  }
+
+  /**
+   * Drafts the three ALPHAZOX news posts (LinkedIn/Instagram/X) for one
+   * already-researched story (see NewsResearchService) in a single Groq
+   * call. Validates per-platform word/hashtag counts and the Twitter
+   * character budget from the spec, retrying on any miss the way the other
+   * generation methods in this class do.
+   */
+  async generateNewsPostBundle(story: NewsStory, recentHeadlines: string[]): Promise<NewsPostBundle> {
+    const prompt = this.buildNewsPostPrompt(story, recentHeadlines);
+
+    for (let attempt = 1; attempt <= NEWS_MAX_GENERATION_ATTEMPTS; attempt += 1) {
+      // This prompt is heavy enough (three full platform posts in one call)
+      // that an instant retry can land in the same tokens-per-minute window
+      // as the previous attempt and 429 again - unlike this class's other
+      // generate* methods, back off between attempts instead of retrying
+      // immediately.
+      if (attempt > 1) {
+        await sleep(4000 * (attempt - 1));
+      }
+
+      const rawText = await this.callGroqApi(prompt, `NewsBundle(${story.category})`, attempt, NEWS_MAX_GENERATION_ATTEMPTS);
+
+      if (rawText === null) {
+        continue;
+      }
+
+      const validation = NewsPostBundleSchema.safeParse(this.safeParseJson(rawText));
+
+      if (!validation.success) {
+        appLogger.warn('Groq response failed schema validation for news post bundle', {
+          attempt,
+          issues: validation.error.issues.map((issue) => issue.message),
+        });
+        continue;
+      }
+
+      const bundle = validation.data;
+      const problems: string[] = [];
+
+      const linkedinWords = countWords(bundle.linkedin.content);
+      if (linkedinWords < NEWS_LINKEDIN_WORD_RANGE.min || linkedinWords > NEWS_LINKEDIN_WORD_RANGE.max) {
+        problems.push(`linkedin word count ${linkedinWords}`);
+      }
+      const linkedinHashtags = countHashtags(bundle.linkedin.hashtags);
+      if (
+        linkedinHashtags < NEWS_LINKEDIN_HASHTAG_RANGE.min ||
+        linkedinHashtags > NEWS_LINKEDIN_HASHTAG_RANGE.max ||
+        !hasAlphazoxHashtag(bundle.linkedin.hashtags)
+      ) {
+        problems.push(`linkedin hashtags ${linkedinHashtags}`);
+      }
+
+      const instagramWords = countWords(bundle.instagram.caption);
+      if (instagramWords < NEWS_INSTAGRAM_WORD_RANGE.min || instagramWords > NEWS_INSTAGRAM_WORD_RANGE.max) {
+        problems.push(`instagram word count ${instagramWords}`);
+      }
+      const instagramHashtags = countHashtags(bundle.instagram.hashtags);
+      if (
+        instagramHashtags < NEWS_INSTAGRAM_HASHTAG_RANGE.min ||
+        instagramHashtags > NEWS_INSTAGRAM_HASHTAG_RANGE.max ||
+        !hasAlphazoxHashtag(bundle.instagram.hashtags)
+      ) {
+        problems.push(`instagram hashtags ${instagramHashtags}`);
+      }
+
+      const twitterCombinedLength = `${bundle.twitter.content} ${bundle.twitter.hashtags}`.trim().length;
+      if (twitterCombinedLength > TWITTER_CHAR_LIMIT) {
+        problems.push(`twitter length ${twitterCombinedLength}`);
+      }
+      const twitterHashtags = countHashtags(bundle.twitter.hashtags);
+      if (twitterHashtags < NEWS_TWITTER_HASHTAG_RANGE.min || twitterHashtags > NEWS_TWITTER_HASHTAG_RANGE.max) {
+        problems.push(`twitter hashtags ${twitterHashtags}`);
+      }
+
+      if (problems.length > 0) {
+        appLogger.warn('News post bundle failed validation; regenerating', { attempt, problems });
+        continue;
+      }
+
+      if (await this.isDuplicateAgainstRecent(bundle.linkedin.content, 'linkedin')) {
+        appLogger.info('Duplicate detected for news post bundle; regenerating', { attempt });
+        continue;
+      }
+
+      return bundle;
+    }
+
+    throw new GroqServiceError(`Unable to generate a valid news post bundle for "${story.headline}" after retries`);
+  }
+
   private async callGroqApi(
     prompt: string,
     label: string,
@@ -287,6 +468,10 @@ Requirements:
           model: env.GROQ_MODEL,
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
+          // This org's Groq tier caps at 8000 tokens/minute account-wide; an
+          // uncapped reasoning model can otherwise burn the whole budget on
+          // one call and 429 every other request for the rest of the run.
+          max_completion_tokens: 3000,
         },
         {
           headers: {

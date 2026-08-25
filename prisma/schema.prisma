@@ -21,6 +21,9 @@ model Post {
   duplicateScore Float?
   contentTheme   String?
   layout         String?
+  newsHeadline   String?
+  newsCategory   String?
+  sourceUrl      String?
   topicId        Int?
   topic          Topic?   @relation(fields: [topicId], references: [id])
   logs           Log[]

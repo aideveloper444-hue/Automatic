@@ -15,6 +15,9 @@ export class PostRepository {
     published?: boolean;
     bufferPostId?: string | null;
     imageUrl?: string | null;
+    newsHeadline?: string | null;
+    newsCategory?: string | null;
+    sourceUrl?: string | null;
   }) {
     return this.prisma.post.create({
       data: {
@@ -29,8 +32,27 @@ export class PostRepository {
         contentTheme: input.contentTheme ?? null,
         layout: input.layout ?? null,
         imageUrl: input.imageUrl ?? null,
+        newsHeadline: input.newsHeadline ?? null,
+        newsCategory: input.newsCategory ?? null,
+        sourceUrl: input.sourceUrl ?? null,
       },
     });
+  }
+
+  /**
+   * Recent story headlines (any platform, deduped), fed back into the news
+   * research and drafting prompts so the hourly cycle doesn't reselect or
+   * re-angle a story it already covered - see NewsResearchService and
+   * GroqService.generateNewsPostBundle.
+   */
+  async getRecentHeadlines(limit = 30): Promise<string[]> {
+    const recent = await this.prisma.post.findMany({
+      where: { newsHeadline: { not: null } },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+      select: { newsHeadline: true },
+    });
+    return [...new Set(recent.map((p) => p.newsHeadline).filter((h): h is string => h !== null))];
   }
 
   /** Most recent content theme used (any platform), so callers can avoid picking the same theme twice in a row. */

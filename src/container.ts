@@ -2,6 +2,7 @@ import { PrismaClient } from '@prisma/client';
 import { PostRepository } from './repositories/post.repository.js';
 import { GeminiService } from './services/gemini.service.js';
 import { GroqService } from './services/groq.service.js';
+import { NewsResearchService } from './services/news-research.service.js';
 import { BufferService } from './services/buffer.service.js';
 import { CloudinaryService } from './services/cloudinary.service.js';
 import { TemplateService } from './services/template.service.js';
@@ -15,6 +16,7 @@ export interface Container {
   postRepository: PostRepository;
   geminiService: GeminiService;
   groqService: GroqService;
+  newsResearchService: NewsResearchService;
   bufferService: BufferService;
   cloudinaryService: CloudinaryService;
   templateService: TemplateService;
@@ -29,6 +31,7 @@ export function buildContainer(): Container {
   const postRepository = new PostRepository(prisma);
   const geminiService = new GeminiService(postRepository);
   const groqService = new GroqService(postRepository);
+  const newsResearchService = new NewsResearchService();
   const bufferService = new BufferService(postRepository);
   const cloudinaryService = new CloudinaryService();
   const templateService = new TemplateService();
@@ -36,6 +39,7 @@ export function buildContainer(): Container {
   const pexelsService = new PexelsService();
   const schedulerService = new SchedulerService(
     groqService,
+    newsResearchService,
     bufferService,
     cloudinaryService,
     templateService,
@@ -50,6 +54,7 @@ export function buildContainer(): Container {
     postRepository,
     geminiService,
     groqService,
+    newsResearchService,
     bufferService,
     cloudinaryService,
     templateService,

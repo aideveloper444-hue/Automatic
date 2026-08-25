@@ -1,10 +1,12 @@
 import cron from 'node-cron';
 import { appLogger } from '../config/logger.js';
 import { env, isCloudinaryConfigured } from '../config/env.js';
-import { ContentTheme, pickWeightedTheme } from '../config/content-themes.js';
+import type { ContentTheme } from '../config/content-themes.js';
+import { resolveNewsCategory } from '../config/news-categories.js';
 import type { LayoutId } from '../config/layouts.js';
 import type { ThemedPostPayload, PostType } from './gemini.service.js';
 import { GroqService } from './groq.service.js';
+import { NewsResearchService } from './news-research.service.js';
 import { BufferService } from './buffer.service.js';
 import { CloudinaryService } from './cloudinary.service.js';
 import { TemplateService } from './template.service.js';
@@ -13,6 +15,7 @@ import { PexelsService } from './pexels.service.js';
 import { isPexelsConfigured } from '../config/env.js';
 import type { BufferChannelService } from './buffer.service.js';
 import type { PostRepository } from '../repositories/post.repository.js';
+import type { NewsPostBundle, NewsStory } from '../validation/news.schema.js';
 
 const SCHEDULE_OFFSET_MINUTES = 5;
 const IST_OFFSET_MS = (5 * 60 + 30) * 60_000;
@@ -28,6 +31,7 @@ function resolvePostType(referenceInstant: Date): PostType {
 export class SchedulerService {
   constructor(
     private readonly groqService: GroqService,
+    private readonly newsResearchService: NewsResearchService,
     private readonly bufferService: BufferService,
     private readonly cloudinaryService: CloudinaryService,
     private readonly templateService: TemplateService,
@@ -51,51 +55,106 @@ export class SchedulerService {
   }
 
   /**
-   * One theme (round-robin-ish, no immediate repeat - see content-themes.ts)
-   * and one hero image per run, shared across the LinkedIn/Twitter/
-   * Instagram cards so a single hourly run only costs one Groq text call
-   * and one OpenAI image call, not three of each.
+   * ALPHAZOX Technology Intelligence engine: research the single most
+   * important live IT/tech story of the hour (NewsResearchService, grounded
+   * in Google Search via Gemini, falling back to Groq's compound web-search
+   * model), draft distinct LinkedIn/Instagram/X posts about it in one Groq
+   * call (GroqService.generateNewsPostBundle), then schedule all three to
+   * Buffer for "now" - see .github/workflows/hourly-automation.yml for the
+   * cron that repeats this every hour indefinitely.
    */
   async runHourlyAutomation(): Promise<void> {
     appLogger.info('Hourly automation run started');
 
     const postType = resolvePostType(new Date());
+    const recentHeadlines = await this.postRepository.getRecentHeadlines();
 
-    const recentThemeIds = await this.postRepository.getRecentlyUsedThemeIds();
-    const theme = pickWeightedTheme(recentThemeIds);
+    let story: NewsStory;
+    try {
+      story = await this.newsResearchService.researchLatestStory(recentHeadlines);
+    } catch (error) {
+      appLogger.error("Failed to research a news story; skipping this hour's run", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    let bundle: NewsPostBundle;
+    try {
+      bundle = await this.groqService.generateNewsPostBundle(story, recentHeadlines);
+    } catch (error) {
+      appLogger.error("Failed to draft platform posts for the researched story; skipping this hour's run", {
+        headline: story.headline,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+
+    const categoryVisual = resolveNewsCategory(story.category);
     /**
      * Locked to "split" per user request - every scheduled post should match
      * the image-left/content-right layout used in the last pre-automation
      * run, rather than rotating across all 4 layouts.
      */
     const layout: LayoutId = 'split';
-
-    let content: ThemedPostPayload;
-
-    try {
-      content = await this.groqService.generateThemedPost(theme);
-    } catch (error) {
-      appLogger.error('Failed to generate themed content; skipping this hour\'s run', {
-        postType,
-        theme: theme.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-
     const dueAt = this.buildScheduleDateString();
-    const heroArt = await this.tryGenerateThemedSceneArt(theme, content);
+
+    const cardTheme: ContentTheme = {
+      id: categoryVisual.id,
+      label: categoryVisual.label,
+      weight: 1,
+      guidance: '',
+      visualHint: categoryVisual.visualHint,
+      imageKeywords: categoryVisual.imageKeywords,
+    };
+    const cardContent: ThemedPostPayload = {
+      headline: bundle.cardHeadline,
+      subheadline: bundle.cardSubheadline,
+      caption: bundle.linkedin.content,
+      hashtags: bundle.linkedin.hashtags,
+    };
+
+    const heroArt = await this.tryGenerateThemedSceneArt(cardTheme, cardContent);
 
     if (!heroArt) {
-      appLogger.error('Skipping this hour\'s run: hero art generation failed', {
-        theme: theme.id,
-      });
+      appLogger.error("Skipping this hour's run: hero art generation failed", { headline: story.headline });
       return;
     }
 
-    await this.scheduleLinkedIn(postType, theme, layout, content, dueAt, heroArt);
-    await this.scheduleTwitter(postType, theme, layout, content, dueAt, heroArt);
-    await this.scheduleInstagram(postType, theme, layout, content, dueAt, heroArt);
+    const linkedinScheduled = await this.scheduleNewsLinkedIn(
+      postType,
+      story,
+      cardTheme,
+      layout,
+      bundle,
+      dueAt,
+      heroArt,
+    );
+    const twitterScheduled = await this.scheduleNewsTwitter(postType, story, cardTheme, layout, bundle, dueAt, heroArt);
+    const instagramScheduled = await this.scheduleNewsInstagram(
+      postType,
+      story,
+      cardTheme,
+      layout,
+      bundle,
+      dueAt,
+      heroArt,
+    );
+
+    appLogger.info('ALPHAZOX HOURLY TECHNOLOGY UPDATE', {
+      time: dueAt,
+      category: categoryVisual.label,
+      headline: story.headline,
+      primarySource: `${story.sourceName} (${story.sourceUrl})`,
+      linkedin: linkedinScheduled ? 'scheduled' : 'skipped',
+      x: twitterScheduled ? 'scheduled' : 'skipped',
+      instagram: instagramScheduled ? 'scheduled' : 'skipped',
+      hashtags: {
+        linkedin: bundle.linkedin.hashtags,
+        instagram: bundle.instagram.hashtags,
+        twitter: bundle.twitter.hashtags,
+      },
+    });
 
     appLogger.info('Hourly automation run completed');
   }
@@ -173,156 +232,196 @@ export class SchedulerService {
     }
   }
 
-  private async scheduleLinkedIn(
+  private async scheduleNewsLinkedIn(
     postType: PostType,
-    theme: ContentTheme,
+    story: NewsStory,
+    cardTheme: ContentTheme,
     layout: LayoutId,
-    content: ThemedPostPayload,
+    bundle: NewsPostBundle,
     dueAt: string,
     heroArt: Buffer,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const cardContent: ThemedPostPayload = {
+      headline: bundle.cardHeadline,
+      subheadline: bundle.cardSubheadline,
+      caption: bundle.linkedin.content,
+      hashtags: bundle.linkedin.hashtags,
+    };
+
     try {
       const imageUrl = await this.tryGenerateImage(
-        content,
-        theme,
+        cardContent,
+        cardTheme,
         layout,
         'linkedin',
-        `${postType}-linkedin-${theme.id}`,
+        `${postType}-linkedin-${cardTheme.id}`,
         heroArt,
       );
 
       const saved = await this.postRepository.savePost({
         type: postType,
         platform: 'linkedin',
-        content: content.caption,
-        hashtags: content.hashtags,
+        content: bundle.linkedin.content,
+        hashtags: bundle.linkedin.hashtags,
         status: 'scheduled',
-        contentTheme: theme.id,
+        contentTheme: cardTheme.id,
         layout,
         imageUrl,
+        newsHeadline: story.headline,
+        newsCategory: story.category,
+        sourceUrl: story.sourceUrl,
       });
 
       await this.bufferService.schedulePost({
         postId: saved.id,
-        text: `${content.caption}\n\n${content.hashtags}`,
+        text: `${bundle.linkedin.content}\n\n${bundle.linkedin.hashtags}`,
         scheduledAt: dueAt,
         service: 'linkedin',
         imageUrl,
       });
+      return true;
     } catch (error) {
       appLogger.error('LinkedIn scheduling failed for this slot', {
         postType,
-        theme: theme.id,
+        headline: story.headline,
         error: error instanceof Error ? error.message : String(error),
       });
+      return false;
     }
   }
 
-  private async scheduleTwitter(
+  /**
+   * Buffer's API has no thread/reply-chain field on CreatePostInput (verified
+   * via GraphQL introspection), so - unlike the LinkedIn/Instagram spec -
+   * every X post here is always a single tweet within the 280-character
+   * limit; the drafting prompt (see GroqService.generateNewsPostBundle) is
+   * instructed accordingly and never produces a thread.
+   */
+  private async scheduleNewsTwitter(
     postType: PostType,
-    theme: ContentTheme,
+    story: NewsStory,
+    cardTheme: ContentTheme,
     layout: LayoutId,
-    content: ThemedPostPayload,
+    bundle: NewsPostBundle,
     dueAt: string,
     heroArt: Buffer,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const cardContent: ThemedPostPayload = {
+      headline: bundle.cardHeadline,
+      subheadline: bundle.cardSubheadline,
+      caption: bundle.twitter.content,
+      hashtags: bundle.twitter.hashtags,
+    };
+
     try {
-      const variant = await this.groqService.generateTwitterVariant(theme.label, content.caption, content.hashtags);
       const imageUrl = await this.tryGenerateImage(
-        content,
-        theme,
+        cardContent,
+        cardTheme,
         layout,
         'twitter',
-        `${postType}-twitter-${theme.id}`,
+        `${postType}-twitter-${cardTheme.id}`,
         heroArt,
       );
 
       const saved = await this.postRepository.savePost({
         type: postType,
         platform: 'twitter',
-        content: variant.content,
-        hashtags: variant.hashtags,
+        content: bundle.twitter.content,
+        hashtags: bundle.twitter.hashtags,
         status: 'scheduled',
-        contentTheme: theme.id,
+        contentTheme: cardTheme.id,
         layout,
         imageUrl,
+        newsHeadline: story.headline,
+        newsCategory: story.category,
+        sourceUrl: story.sourceUrl,
       });
 
       await this.bufferService.schedulePost({
         postId: saved.id,
-        text: variant.hashtags ? `${variant.content} ${variant.hashtags}` : variant.content,
+        text: bundle.twitter.hashtags
+          ? `${bundle.twitter.content} ${bundle.twitter.hashtags}`
+          : bundle.twitter.content,
         scheduledAt: dueAt,
         service: 'twitter',
         imageUrl,
       });
+      return true;
     } catch (error) {
       appLogger.error('Twitter scheduling failed for this slot', {
         postType,
-        theme: theme.id,
+        headline: story.headline,
         error: error instanceof Error ? error.message : String(error),
       });
+      return false;
     }
   }
 
-  private async scheduleInstagram(
+  private async scheduleNewsInstagram(
     postType: PostType,
-    theme: ContentTheme,
+    story: NewsStory,
+    cardTheme: ContentTheme,
     layout: LayoutId,
-    content: ThemedPostPayload,
+    bundle: NewsPostBundle,
     dueAt: string,
     heroArt: Buffer,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!isCloudinaryConfigured) {
       appLogger.info('Skipping Instagram: Cloudinary is not configured', { postType });
-      return;
+      return false;
     }
 
-    try {
-      const variant = await this.groqService.generateInstagramVariant(
-        theme.label,
-        content.caption,
-        content.caption,
-        content.hashtags,
-      );
+    const cardContent: ThemedPostPayload = {
+      headline: bundle.cardHeadline,
+      subheadline: bundle.cardSubheadline,
+      caption: bundle.instagram.caption,
+      hashtags: bundle.instagram.hashtags,
+    };
 
+    try {
       const imageUrl = await this.tryGenerateImage(
-        content,
-        theme,
+        cardContent,
+        cardTheme,
         layout,
         'instagram',
-        `${postType}-instagram-${theme.id}`,
+        `${postType}-instagram-${cardTheme.id}`,
         heroArt,
       );
 
       if (!imageUrl) {
         appLogger.error('Skipping Instagram: image rendering failed', { postType });
-        return;
+        return false;
       }
 
       const saved = await this.postRepository.savePost({
         type: postType,
         platform: 'instagram',
-        content: variant.caption,
-        hashtags: variant.hashtags,
+        content: bundle.instagram.caption,
+        hashtags: bundle.instagram.hashtags,
         status: 'scheduled',
-        contentTheme: theme.id,
+        contentTheme: cardTheme.id,
         layout,
         imageUrl,
+        newsHeadline: story.headline,
+        newsCategory: story.category,
+        sourceUrl: story.sourceUrl,
       });
 
       await this.bufferService.schedulePost({
         postId: saved.id,
-        text: `${variant.caption}\n\n${variant.hashtags}`,
+        text: `${bundle.instagram.caption}\n\n${bundle.instagram.hashtags}`,
         scheduledAt: dueAt,
         service: 'instagram',
         imageUrl,
       });
+      return true;
     } catch (error) {
       appLogger.error('Instagram scheduling failed for this slot', {
         postType,
-        theme: theme.id,
+        headline: story.headline,
         error: error instanceof Error ? error.message : String(error),
       });
+      return false;
     }
   }
 
