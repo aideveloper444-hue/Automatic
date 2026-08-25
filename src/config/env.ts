@@ -33,6 +33,11 @@ const envSchema = z.object({
   // Gemini's free tier caps at 20 requests/day, too small for this pipeline's cadence.
   GROQ_API_KEY: z.string().optional(),
   GROQ_MODEL: z.string().default('openai/gpt-oss-120b'),
+  // Optional: deterministic news-search fallback (see news-research.service.ts)
+  // if Groq's compound web search fails - a real news API rather than an LLM
+  // deciding whether/how much to search, so it sidesteps that failure mode
+  // entirely. Free tier at gnews.io comfortably covers this pipeline's cadence.
+  GNEWS_API_KEY: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);
@@ -44,3 +49,4 @@ export const isCloudinaryConfigured = Boolean(
 export const isOpenAiConfigured = Boolean(env.OPENAI_API_KEY);
 export const isPexelsConfigured = Boolean(env.PEXELS_API_KEY);
 export const isGroqConfigured = Boolean(env.GROQ_API_KEY);
+export const isGNewsConfigured = Boolean(env.GNEWS_API_KEY);
