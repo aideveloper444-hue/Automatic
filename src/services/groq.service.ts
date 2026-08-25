@@ -383,7 +383,13 @@ Each "hashtags" value MUST be a single space-separated string, NOT a JSON array.
         await sleep(4000 * (attempt - 1));
       }
 
-      const rawText = await this.callGroqApi(prompt, `NewsBundle(${story.category})`, attempt, NEWS_MAX_GENERATION_ATTEMPTS);
+      const rawText = await this.callGroqApi(
+        prompt,
+        `NewsBundle(${story.category})`,
+        attempt,
+        NEWS_MAX_GENERATION_ATTEMPTS,
+        6500,
+      );
 
       if (rawText === null) {
         continue;
@@ -458,6 +464,7 @@ Each "hashtags" value MUST be a single space-separated string, NOT a JSON array.
     label: string,
     attempt: number,
     maxAttempts: number = MAX_GENERATION_ATTEMPTS,
+    maxCompletionTokens: number = 3000,
   ): Promise<string | null> {
     appLogger.info('Calling Groq chat completions API', { label, attempt, model: env.GROQ_MODEL });
 
@@ -468,10 +475,14 @@ Each "hashtags" value MUST be a single space-separated string, NOT a JSON array.
           model: env.GROQ_MODEL,
           messages: [{ role: 'user', content: prompt }],
           response_format: { type: 'json_object' },
-          // This org's Groq tier caps at 8000 tokens/minute account-wide; an
-          // uncapped reasoning model can otherwise burn the whole budget on
-          // one call and 429 every other request for the rest of the run.
-          max_completion_tokens: 3000,
+          // This org's Groq tier caps at 8000 tokens/minute account-wide, so
+          // this stays capped rather than uncapped - but too low and a
+          // reasoning model can burn its whole budget on hidden reasoning
+          // tokens and get cut off mid-JSON (Groq returns 400
+          // json_validate_failed: "max completion tokens reached before
+          // generating a valid document"). Callers with a larger prompt
+          // (see generateNewsPostBundle) pass a higher ceiling.
+          max_completion_tokens: maxCompletionTokens,
         },
         {
           headers: {
@@ -492,7 +503,8 @@ Each "hashtags" value MUST be a single space-separated string, NOT a JSON array.
       return validation.data.choices[0]?.message?.content ?? '';
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      appLogger.error('Groq API call failed', { label, attempt, error: message });
+      const responseData = (error as { response?: { data?: unknown } })?.response?.data;
+      appLogger.error('Groq API call failed', { label, attempt, error: message, responseData });
 
       if (attempt === maxAttempts) {
         throw new GroqServiceError(message);
