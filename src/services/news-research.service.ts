@@ -19,89 +19,53 @@ const TOPIC_SUMMARY =
 
 const CATEGORY_IDS = Object.keys(NEWS_CATEGORIES).join(', ');
 
-function buildResearchPrompt(recentHeadlines: string[]): string {
+/**
+ * Deliberately just a plain research ask, with no structured-output format
+ * demanded - asking a search-enabled model to also produce a strict 7-field
+ * template in the same turn was pushing Groq's `compound` model into
+ * excessive multi-query search fan-out, which intermittently tripped a
+ * request-size guard ("413 Request Entity Too Large") independent of this
+ * prompt's own size - reproduced even on a clean GitHub Actions runner with
+ * no prior calls, so it wasn't a rate-limit artifact. Structuring into the
+ * NewsStory shape now happens as a separate, non-search extraction call -
+ * see extractStory().
+ */
+function buildSearchPrompt(recentHeadlines: string[]): string {
   const avoidBlock =
     recentHeadlines.length > 0
-      ? `\nDo not pick a story matching any of these recently-covered angles: ${recentHeadlines.slice(0, 8).join(' | ')}\n`
+      ? ` Avoid picking a story matching any of these recently-covered angles: ${recentHeadlines.slice(0, 8).join(' | ')}.`
       : '';
 
-  return `You are a technology news researcher for ALPHAZOX, an IT and digital transformation company.
+  return `Search the web for today's single most important technology/IT news story. The beat is: ${TOPIC_SUMMARY}.${avoidBlock}
 
-Do ONE web search for today's top technology news. The beat is: ${TOPIC_SUMMARY}.
-
-Rules:
-- Only report a real story you actually found via search. Never invent a story or facts.
-- Prefer original sources, official company announcements, or reputable technology/business publications.
-- If the story is still developing/unconfirmed in parts, you must say so.
-${avoidBlock}
-From what you find, pick the SINGLE most important technology development right now.
-
-Respond in EXACTLY this plain-text format, with each field on its own line (SUMMARY may span multiple lines and must be last):
-
-HEADLINE: <one factual headline, under 20 words>
-CATEGORY: <exactly one of: ${CATEGORY_IDS}>
-SOURCE_NAME: <name of the original/primary publication or company that reported this>
-SOURCE_URL: <the direct URL of that source, if you have it, else "unknown">
-IS_DEVELOPING: <true or false - true only if the story is still actively unfolding/unconfirmed>
-IS_MARKET_STORY: <true or false - true only if this is about stock prices, earnings, Nasdaq, or market movements>
-SUMMARY: <4-8 sentences: what happened, what technology is involved, why it matters, what it means for businesses/IT leaders, and what could happen next. If IS_MARKET_STORY is true, write it as two clearly labeled parts: "FACT: ..." stating only what happened, and "ANALYSIS: ..." for why it may be happening - never a buy/sell recommendation or guaranteed prediction.>`;
+Only report a real story you actually found via search - never invent one. Prefer original sources, official
+company announcements, or reputable technology/business publications. Tell me: the headline, the source
+publication/company name and its URL, whether the story is still developing/unconfirmed, whether it's about stock
+prices/earnings/market movements, and a summary of what happened, what technology is involved, why it matters for
+businesses and IT leaders, and what could happen next.`;
 }
 
-interface ParsedResearch {
-  headline: string;
-  category: string;
-  sourceName: string;
-  sourceUrl: string;
-  isDeveloping: boolean;
-  isMarketStory: boolean;
-  summary: string;
-}
+function buildExtractionPrompt(rawText: string): string {
+  return `Extract the single news story described below into the exact JSON shape requested. Do not add, invent, or
+change any facts - only restructure what's already stated.
 
-function parseResearchText(text: string): ParsedResearch | null {
-  const get = (field: string): string | undefined => {
-    const match = text.match(new RegExp(`^${field}:\\s*(.+)$`, 'im'));
-    return match?.[1]?.trim();
-  };
+Research text:
+"""
+${rawText}
+"""
 
-  const summaryMatch = text.match(/^SUMMARY:\s*([\s\S]+)$/im);
-
-  const headline = get('HEADLINE');
-  const category = get('CATEGORY');
-  const sourceName = get('SOURCE_NAME');
-  const sourceUrl = get('SOURCE_URL');
-  const isDeveloping = get('IS_DEVELOPING');
-  const isMarketStory = get('IS_MARKET_STORY');
-  const summary = summaryMatch?.[1]?.trim();
-
-  if (!headline || !category || !sourceName || !sourceUrl || !summary) {
-    return null;
-  }
-
-  return {
-    headline,
-    category: category.toLowerCase().trim(),
-    sourceName,
-    sourceUrl,
-    isDeveloping: /true/i.test(isDeveloping ?? ''),
-    isMarketStory: /true/i.test(isMarketStory ?? ''),
-    summary,
-  };
-}
-
-function toNewsStory(parsed: ParsedResearch): NewsStory | null {
-  const category = NEWS_CATEGORIES[parsed.category] ? parsed.category : 'enterprise-it';
-
-  const result = NewsStorySchema.safeParse({
-    headline: parsed.headline,
-    category,
-    sourceName: parsed.sourceName,
-    sourceUrl: parsed.sourceUrl,
-    isDeveloping: parsed.isDeveloping,
-    isMarketStory: parsed.isMarketStory,
-    summary: parsed.summary,
-  });
-
-  return result.success ? result.data : null;
+Output JSON only with this exact shape:
+{
+  "headline": "<one factual headline, under 20 words>",
+  "category": "<exactly one of: ${CATEGORY_IDS}>",
+  "sourceName": "<the source publication/company name>",
+  "sourceUrl": "<the source URL, or 'unknown' if none was given>",
+  "isDeveloping": <true or false - true only if the text says this is still unfolding/unconfirmed>,
+  "isMarketStory": <true or false - true only if this is about stock prices, earnings, Nasdaq, or market movements>,
+  "summary": "<4-8 sentences covering what happened, why it matters, and what could happen next. If isMarketStory is
+    true, structure it as two clearly labeled parts: 'FACT: ...' for only what happened, and 'ANALYSIS: ...' for
+    why it may be happening - never a buy/sell recommendation or guaranteed prediction.>"
+}`;
 }
 
 const GeminiGroundedResponseSchema = z.object({
@@ -135,35 +99,56 @@ const GroqCompoundResponseSchema = z.object({
     .min(1),
 });
 
+const GroqJsonResponseSchema = GroqCompoundResponseSchema;
+
 /**
  * Live news discovery for the hourly ALPHAZOX pipeline. Gemini's "grounding
  * with Google Search" tool is the primary path since it's genuinely backed
- * by Google Search/News, not an approximation. Structured JSON output mode
- * can't be combined with tools in the same Gemini call, so this asks for a
- * plain delimited text format instead and parses it - see parseResearchText.
+ * by Google Search/News, not an approximation. Falls back to Groq's
+ * `groq/compound` model (built-in web search, no separate API key needed)
+ * if Gemini fails or its free-tier quota (20 requests/day) is exhausted
+ * before this cadence's 24 runs/day - same primary+fallback resilience
+ * pattern as OpenAI image generation -> Pexels elsewhere in this codebase.
  *
- * Falls back to Groq's `groq/compound` model (built-in web search, no
- * separate API key needed) if Gemini fails or its free-tier quota
- * (20 requests/day) is exhausted before this cadence's 24 runs/day - same
- * primary+fallback resilience pattern as OpenAI image generation -> Pexels
- * elsewhere in this codebase.
+ * Both paths return freeform grounded text (see buildSearchPrompt), which
+ * is then structured into the NewsStory shape by one shared, non-search
+ * Groq JSON-mode call (extractStory) - more robust than asking a
+ * search-enabled model to also hit a strict output format in one turn.
  */
 export class NewsResearchService {
   async researchLatestStory(recentHeadlines: string[]): Promise<NewsStory> {
-    const prompt = buildResearchPrompt(recentHeadlines);
+    const prompt = buildSearchPrompt(recentHeadlines);
+
+    let rawText: string;
+    let citation: { uri?: string; title?: string } | undefined;
 
     try {
-      return await this.researchViaGemini(prompt);
+      const result = await this.searchViaGemini(prompt);
+      rawText = result.text;
+      citation = result.citation;
     } catch (error) {
       appLogger.warn('Gemini news research failed; falling back to Groq compound web search', {
         error: error instanceof Error ? error.message : String(error),
       });
+      rawText = await this.searchViaGroqCompound(prompt);
     }
 
-    return this.researchViaGroqCompound(prompt);
+    const story = await this.extractStory(rawText);
+
+    // Prefer a real grounding citation URL over whatever URL the model wrote
+    // in prose, if Gemini actually attached one for this response.
+    if (citation?.uri) {
+      story.sourceUrl = citation.uri;
+      if (citation.title) {
+        story.sourceName = citation.title;
+      }
+    }
+
+    appLogger.info('News research succeeded', { headline: story.headline, category: story.category });
+    return story;
   }
 
-  private async researchViaGemini(prompt: string): Promise<NewsStory> {
+  private async searchViaGemini(prompt: string): Promise<{ text: string; citation?: { uri?: string; title?: string } }> {
     appLogger.info('Researching latest story via Gemini (Google Search grounding)');
 
     const response = await axios.post(
@@ -189,44 +174,25 @@ export class NewsResearchService {
     }
 
     const text = validation.data.candidates[0]?.content?.parts?.[0]?.text ?? '';
-    const parsed = parseResearchText(text);
 
-    if (!parsed) {
-      throw new NewsResearchServiceError('Could not parse Gemini research response');
+    if (!text.trim()) {
+      throw new NewsResearchServiceError('Gemini returned an empty research response');
     }
 
-    // Prefer a real grounding citation URL over whatever URL the model wrote
-    // in prose, if Gemini actually attached one for this response.
     const groundingChunk = validation.data.candidates[0]?.groundingMetadata?.groundingChunks?.[0]?.web;
-    if (groundingChunk?.uri) {
-      parsed.sourceUrl = groundingChunk.uri;
-      if (groundingChunk.title) {
-        parsed.sourceName = groundingChunk.title;
-      }
-    }
-
-    const story = toNewsStory(parsed);
-
-    if (!story) {
-      throw new NewsResearchServiceError('Gemini research result failed validation');
-    }
-
-    appLogger.info('Gemini news research succeeded', { headline: story.headline, category: story.category });
-    return story;
+    return { text, citation: groundingChunk };
   }
 
   /**
    * `groq/compound-mini` was tried here first since it's documented as one
-   * tool call per request (avoiding the multi-search fan-out that
-   * intermittently trips Groq's request-size guard, "413 Request Entity Too
-   * Large", on the full compound model). In practice compound-mini often
-   * declines to search at all ("I'm unable to perform a live web search")
-   * rather than using its one allowed call, which is worse - so this uses
-   * full `groq/compound` with an explicit "you must search" instruction and
-   * a retry, accepting the occasional 413 as a retryable failure instead.
+   * tool call per request. In practice compound-mini often declines to
+   * search at all ("I'm unable to perform a live web search") rather than
+   * using its one allowed call, which is worse - so this uses full
+   * `groq/compound` with a retry instead, now that the simplified prompt
+   * (see buildSearchPrompt) has largely stopped triggering the 413s that
+   * motivated trying compound-mini in the first place.
    */
-  private async researchViaGroqCompound(prompt: string): Promise<NewsStory> {
-    const searchPrompt = `${prompt}\n\nYou MUST use your web search tool before answering - do not answer from memory or say you are unable to search.`;
+  private async searchViaGroqCompound(prompt: string): Promise<string> {
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -237,8 +203,8 @@ export class NewsResearchService {
           'https://api.groq.com/openai/v1/chat/completions',
           {
             model: 'groq/compound',
-            messages: [{ role: 'user', content: searchPrompt }],
-            max_completion_tokens: 900,
+            messages: [{ role: 'user', content: prompt }],
+            max_completion_tokens: 700,
           },
           {
             headers: {
@@ -256,28 +222,16 @@ export class NewsResearchService {
         }
 
         const text = validation.data.choices[0]?.message?.content ?? '';
-        const parsed = parseResearchText(text);
 
-        if (!parsed) {
-          appLogger.warn('Groq compound response text that failed parsing', { text: text.slice(0, 500) });
-          throw new NewsResearchServiceError('Could not parse Groq compound research response');
+        if (!text.trim()) {
+          throw new NewsResearchServiceError('Groq compound returned an empty research response');
         }
 
-        const story = toNewsStory(parsed);
-
-        if (!story) {
-          throw new NewsResearchServiceError('Groq compound research result failed validation');
-        }
-
-        appLogger.info('Groq compound-mini news research succeeded', {
-          headline: story.headline,
-          category: story.category,
-        });
-        return story;
+        return text;
       } catch (error) {
         lastError = error;
         const message = error instanceof Error ? error.message : String(error);
-        appLogger.warn('Groq compound-mini research attempt failed', { attempt, error: message });
+        appLogger.warn('Groq compound research attempt failed', { attempt, error: message });
 
         if (attempt < 2) {
           await new Promise((resolve) => setTimeout(resolve, 5000));
@@ -287,5 +241,54 @@ export class NewsResearchService {
 
     const message = lastError instanceof Error ? lastError.message : String(lastError);
     throw lastError instanceof NewsResearchServiceError ? lastError : new NewsResearchServiceError(message);
+  }
+
+  /** Non-search Groq JSON-mode call that structures raw grounded text into the NewsStory shape. */
+  private async extractStory(rawText: string): Promise<NewsStory> {
+    const response = await axios.post(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        model: env.GROQ_MODEL,
+        messages: [{ role: 'user', content: buildExtractionPrompt(rawText) }],
+        response_format: { type: 'json_object' },
+        max_completion_tokens: 1200,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 60000,
+      },
+    );
+
+    const validation = GroqJsonResponseSchema.safeParse(response.data);
+
+    if (!validation.success) {
+      throw new NewsResearchServiceError('Story extraction response failed schema validation');
+    }
+
+    const content = validation.data.choices[0]?.message?.content ?? '';
+
+    let json: unknown;
+    try {
+      json = JSON.parse(content.replace(/```json|```/g, '').trim());
+    } catch {
+      throw new NewsResearchServiceError('Could not parse extracted story JSON');
+    }
+
+    if (typeof json === 'object' && json !== null && 'category' in json) {
+      const raw = json as Record<string, unknown>;
+      const category = typeof raw.category === 'string' ? raw.category.toLowerCase().trim() : '';
+      raw.category = NEWS_CATEGORIES[category] ? category : 'enterprise-it';
+    }
+
+    const result = NewsStorySchema.safeParse(json);
+
+    if (!result.success) {
+      throw new NewsResearchServiceError('Extracted story failed validation');
+    }
+
+    return result.data;
   }
 }
