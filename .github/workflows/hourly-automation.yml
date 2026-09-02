@@ -38,6 +38,10 @@ jobs:
       # script — hoisted to job level so it's never missing partway through.
       DATABASE_URL: ${{ secrets.DATABASE_URL || 'file:./dev.db' }}
     steps:
+      - name: Record run start time
+        id: start_time
+        run: echo "start_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -81,3 +85,37 @@ jobs:
           PORT: 3000
           TIMEZONE: Asia/Kolkata
         run: npm run generate:hourly
+
+      # GitHub's own `schedule:` trigger (above) is best-effort and can be
+      # delayed or dropped by hours during high platform load. To hold a real
+      # hourly cadence, each run instead re-triggers itself on-demand
+      # (workflow_dispatch, which isn't subject to that queuing delay) after
+      # sleeping out the rest of the hour. `if: always()` so a failed post
+      # this hour doesn't break next hour's chain. Requires the DISPATCH_TOKEN
+      # repo secret (a PAT with Actions read/write) - GITHUB_TOKEN can't be
+      # used here since GitHub blocks it from starting new workflow runs, to
+      # prevent recursive-trigger loops.
+      - name: Sleep until next hourly slot
+        if: always()
+        run: |
+          elapsed=$(( $(date +%s) - ${{ steps.start_time.outputs.start_epoch }} ))
+          sleep_for=$(( 3600 - elapsed ))
+          if [ "$sleep_for" -gt 0 ]; then
+            echo "Sleeping ${sleep_for}s to hold the hourly cadence"
+            sleep "$sleep_for"
+          fi
+
+      - name: Trigger next hourly run
+        if: always()
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$DISPATCH_TOKEN" ]; then
+            echo "DISPATCH_TOKEN secret not set; relying on the schedule trigger only (see repo Settings > Secrets and variables > Actions)" >&2
+            exit 0
+          fi
+          curl -sf -X POST \
+            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/hourly-automation.yml/dispatches" \
+            -d '{"ref":"main"}'
