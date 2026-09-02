@@ -12,22 +12,39 @@ export class NewsResearchServiceError extends AppError {
   }
 }
 
-const TOPIC_SUMMARY =
-  'AI/agentic AI/LLMs, AI chips/GPUs/semiconductors, cloud & data centers, cybersecurity, software/SaaS/DevOps, ' +
-  'enterprise IT & digital transformation, quantum computing, Big Tech (Microsoft, Google, Amazon, Apple, Meta, ' +
-  'Nvidia, AMD, Intel, OpenAI, Anthropic, Oracle, Salesforce, and similar), and U.S. tech markets/stocks/earnings/M&A';
+/**
+ * A "beat" scopes research to one editorial lane of the hourly rotation (see
+ * scheduler.service.ts) - what to search for, the GNews query, and which
+ * NEWS_CATEGORIES ids are valid outcomes for this beat (so e.g. a healthcare
+ * search can't get classified as "big-tech"). Defined per-beat in
+ * config/news-beats.ts; this service is beat-agnostic.
+ */
+export interface NewsBeat {
+  id: string;
+  topicSummary: string;
+  /** GNews's free tier caps the search query at 200 characters. */
+  gnewsQuery: string;
+  categoryIds: string[];
+  defaultCategory: string;
+}
 
-// GNews's free tier caps the search query at 200 characters, so this stays
-// deliberately shorter than the full TOPIC_SUMMARY beat above.
-const GNEWS_QUERY =
-  '(AI OR "generative AI" OR LLM OR cybersecurity OR semiconductor OR "cloud computing" OR "enterprise IT" ' +
-  'OR "tech stocks" OR "big tech" OR SaaS)';
+export const AI_TECH_BEAT: NewsBeat = {
+  id: 'ai-tech',
+  topicSummary:
+    'AI/agentic AI/LLMs, AI chips/GPUs/semiconductors, cloud & data centers, cybersecurity, software/SaaS/DevOps, ' +
+    'enterprise IT & digital transformation, quantum computing, Big Tech (Microsoft, Google, Amazon, Apple, Meta, ' +
+    'Nvidia, AMD, Intel, OpenAI, Anthropic, Oracle, Salesforce, and similar), and U.S. tech markets/stocks/earnings/M&A',
+  gnewsQuery:
+    '(AI OR "generative AI" OR LLM OR cybersecurity OR semiconductor OR "cloud computing" OR "enterprise IT" ' +
+    'OR "tech stocks" OR "big tech" OR SaaS)',
+  categoryIds: Object.keys(NEWS_CATEGORIES).filter((id) => id !== 'healthcare-it' && id !== 'industry-tech'),
+  defaultCategory: 'enterprise-it',
+};
 
-const CATEGORY_IDS = Object.keys(NEWS_CATEGORIES).join(', ');
-
-const STORY_JSON_SHAPE = `{
+function buildStoryJsonShape(categoryIds: string[]): string {
+  return `{
   "headline": "<one factual headline, under 20 words>",
-  "category": "<exactly one of: ${CATEGORY_IDS}>",
+  "category": "<exactly one of: ${categoryIds.join(', ')}>",
   "sourceName": "<the source publication/company name>",
   "sourceUrl": "<the source URL, or 'unknown' if none was given>",
   "isDeveloping": <true or false - true only if the text says this is still unfolding/unconfirmed>,
@@ -36,6 +53,7 @@ const STORY_JSON_SHAPE = `{
     true, structure it as two clearly labeled parts: 'FACT: ...' for only what happened, and 'ANALYSIS: ...' for
     why it may be happening - never a buy/sell recommendation or guaranteed prediction.>"
 }`;
+}
 
 /**
  * Deliberately just a plain research ask, with no structured-output format
@@ -48,22 +66,22 @@ const STORY_JSON_SHAPE = `{
  * NewsStory shape happens as a separate, non-search extraction call - see
  * extractStory().
  */
-function buildSearchPrompt(recentHeadlines: string[]): string {
+function buildSearchPrompt(recentHeadlines: string[], beat: NewsBeat): string {
   const avoidBlock =
     recentHeadlines.length > 0
       ? ` Avoid picking a story matching any of these recently-covered angles: ${recentHeadlines.slice(0, 8).join(' | ')}.`
       : '';
 
-  return `Search the web for today's single most important technology/IT news story. The beat is: ${TOPIC_SUMMARY}.${avoidBlock}
+  return `Search the web for today's single most important news story on this beat: ${beat.topicSummary}.${avoidBlock}
 
 Only report a real story you actually found via search - never invent one. Prefer original sources, official
-company announcements, or reputable technology/business publications. Tell me: the headline, the source
-publication/company name and its URL, whether the story is still developing/unconfirmed, whether it's about stock
-prices/earnings/market movements, and a summary of what happened, what technology is involved, why it matters for
-businesses and IT leaders, and what could happen next.`;
+company announcements, or reputable publications. Tell me: the headline, the source publication/company name and
+its URL, whether the story is still developing/unconfirmed, whether it's about stock prices/earnings/market
+movements, and a summary of what happened, what's involved, why it matters for businesses and leaders in this
+space, and what could happen next.`;
 }
 
-function buildExtractionPrompt(rawText: string): string {
+function buildExtractionPrompt(rawText: string, beat: NewsBeat): string {
   return `Extract the single news story described below into the exact JSON shape requested. Do not add, invent, or
 change any facts - only restructure what's already stated.
 
@@ -73,18 +91,18 @@ ${rawText}
 """
 
 Output JSON only with this exact shape:
-${STORY_JSON_SHAPE}`;
+${buildStoryJsonShape(beat.categoryIds)}`;
 }
 
-function buildSelectionPrompt(articlesText: string, recentHeadlines: string[]): string {
+function buildSelectionPrompt(articlesText: string, recentHeadlines: string[], beat: NewsBeat): string {
   const avoidBlock =
     recentHeadlines.length > 0
       ? `\nAvoid selecting a story matching any of these recently-covered angles: ${recentHeadlines.slice(0, 8).join(' | ')}\n`
       : '';
 
-  return `Below are real, recently-published articles from a news search. Some may be irrelevant (consumer gadgets,
-gaming, entertainment) - ignore those. From the genuinely IT/enterprise-technology-relevant articles, select the
-SINGLE most important one for ALPHAZOX's audience (CIOs, CTOs, IT leaders, developers, enterprise decision-makers).
+  return `Below are real, recently-published articles from a news search. Some may be irrelevant to this beat -
+ignore those. This beat is: ${beat.topicSummary}. From the genuinely relevant articles, select the SINGLE most
+important one for ALPHAZOX's audience (CIOs, CTOs, IT leaders, developers, enterprise decision-makers).
 ${avoidBlock}
 Articles:
 """
@@ -93,7 +111,7 @@ ${articlesText}
 
 Output JSON only with this exact shape, using only facts from the article you selected - do not add or invent
 anything beyond what's stated:
-${STORY_JSON_SHAPE}`;
+${buildStoryJsonShape(beat.categoryIds)}`;
 }
 
 const GeminiGroundedResponseSchema = z.object({
@@ -171,8 +189,8 @@ const GNewsResponseSchema = z.object({
  * (selectStoryFromArticles).
  */
 export class NewsResearchService {
-  async researchLatestStory(recentHeadlines: string[]): Promise<NewsStory> {
-    const prompt = buildSearchPrompt(recentHeadlines);
+  async researchLatestStory(recentHeadlines: string[], beat: NewsBeat = AI_TECH_BEAT): Promise<NewsStory> {
+    const prompt = buildSearchPrompt(recentHeadlines, beat);
 
     // GNews first: on every real run today, Groq compound has 413'd twice
     // before falling through anyway, and each failed attempt still reserves
@@ -183,12 +201,13 @@ export class NewsResearchService {
     // trying it first leaves far more headroom for drafting.
     if (isGNewsConfigured) {
       try {
-        const articlesText = await this.fetchGNewsArticles();
-        const story = await this.selectStoryFromArticles(articlesText, recentHeadlines);
-        appLogger.info('News research succeeded via GNews', { headline: story.headline });
+        const articlesText = await this.fetchGNewsArticles(beat);
+        const story = await this.selectStoryFromArticles(articlesText, recentHeadlines, beat);
+        appLogger.info('News research succeeded via GNews', { beat: beat.id, headline: story.headline });
         return story;
       } catch (error) {
         appLogger.warn('GNews failed; falling back to Groq compound web search', {
+          beat: beat.id,
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -196,17 +215,18 @@ export class NewsResearchService {
 
     try {
       const rawText = await this.searchViaGroqCompound(prompt);
-      const story = await this.extractStory(rawText);
-      appLogger.info('News research succeeded via Groq compound', { headline: story.headline });
+      const story = await this.extractStory(rawText, beat);
+      appLogger.info('News research succeeded via Groq compound', { beat: beat.id, headline: story.headline });
       return story;
     } catch (error) {
       appLogger.warn('Groq compound web search failed; falling back to Gemini Google Search grounding', {
+        beat: beat.id,
         error: error instanceof Error ? error.message : String(error),
       });
     }
 
     const { text, citation } = await this.searchViaGemini(prompt);
-    const story = await this.extractStory(text);
+    const story = await this.extractStory(text, beat);
 
     // Prefer a real grounding citation URL over whatever URL the model wrote
     // in prose, if Gemini actually attached one for this response.
@@ -217,16 +237,16 @@ export class NewsResearchService {
       }
     }
 
-    appLogger.info('News research succeeded via Gemini', { headline: story.headline });
+    appLogger.info('News research succeeded via Gemini', { beat: beat.id, headline: story.headline });
     return story;
   }
 
-  private async fetchGNewsArticles(): Promise<string> {
-    appLogger.info('Researching latest story via GNews');
+  private async fetchGNewsArticles(beat: NewsBeat): Promise<string> {
+    appLogger.info('Researching latest story via GNews', { beat: beat.id });
 
     const response = await axios.get('https://gnews.io/api/v4/search', {
       params: {
-        q: GNEWS_QUERY,
+        q: beat.gnewsQuery,
         lang: 'en',
         max: 10,
         sortby: 'publishedAt',
@@ -343,16 +363,20 @@ export class NewsResearchService {
   }
 
   /** Non-search Groq JSON-mode call that structures raw grounded text into the NewsStory shape. */
-  private async extractStory(rawText: string): Promise<NewsStory> {
-    return this.runStoryJsonCall(buildExtractionPrompt(rawText));
+  private async extractStory(rawText: string, beat: NewsBeat): Promise<NewsStory> {
+    return this.runStoryJsonCall(buildExtractionPrompt(rawText, beat), beat);
   }
 
   /** Non-search Groq JSON-mode call that picks and structures one story out of a list of real GNews articles. */
-  private async selectStoryFromArticles(articlesText: string, recentHeadlines: string[]): Promise<NewsStory> {
-    return this.runStoryJsonCall(buildSelectionPrompt(articlesText, recentHeadlines));
+  private async selectStoryFromArticles(
+    articlesText: string,
+    recentHeadlines: string[],
+    beat: NewsBeat,
+  ): Promise<NewsStory> {
+    return this.runStoryJsonCall(buildSelectionPrompt(articlesText, recentHeadlines, beat), beat);
   }
 
-  private async runStoryJsonCall(prompt: string): Promise<NewsStory> {
+  private async runStoryJsonCall(prompt: string, beat: NewsBeat): Promise<NewsStory> {
     const response = await axios.post(
       'https://api.groq.com/openai/v1/chat/completions',
       {
@@ -388,7 +412,7 @@ export class NewsResearchService {
     if (typeof json === 'object' && json !== null && 'category' in json) {
       const raw = json as Record<string, unknown>;
       const category = typeof raw.category === 'string' ? raw.category.toLowerCase().trim() : '';
-      raw.category = NEWS_CATEGORIES[category] ? category : 'enterprise-it';
+      raw.category = beat.categoryIds.includes(category) ? category : beat.defaultCategory;
     }
 
     const result = NewsStorySchema.safeParse(json);

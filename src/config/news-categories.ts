@@ -68,6 +68,18 @@ export const NEWS_CATEGORIES: Record<string, NewsCategoryVisual> = {
     visualHint: 'modern corporate technology office setting, photorealistic',
     imageKeywords: ['modern tech office', 'corporate technology campus', 'professional office collaboration'],
   },
+  'healthcare-it': {
+    id: 'healthcare-it',
+    label: 'Healthcare IT',
+    visualHint: 'clean, professional healthcare-technology visual (EHR dashboard, telemedicine call, clinical data on screen) - photorealistic, reassuring, never clinical/gory',
+    imageKeywords: ['doctor using tablet technology', 'electronic health record screen', 'telemedicine video call'],
+  },
+  'industry-tech': {
+    id: 'industry-tech',
+    label: 'Industry Transformation',
+    visualHint: 'professional cross-industry technology-adoption visual (factory floor, warehouse, retail, finance) - grounded and photorealistic',
+    imageKeywords: ['factory automation technology', 'logistics warehouse technology', 'finance team analyzing screens'],
+  },
 };
 
 export const DEFAULT_NEWS_CATEGORY = 'enterprise-it';

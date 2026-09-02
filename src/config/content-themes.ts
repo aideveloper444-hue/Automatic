@@ -183,7 +183,24 @@ export const CONTENT_THEMES: ContentTheme[] = [
     visualHint: 'professional team/technology visual relevant to the specific service',
     imageKeywords: ['tech team collaboration office', 'software team meeting laptops', 'professional developers office'],
   },
+  {
+    id: 'building-alphazox',
+    label: 'Building Alphazox',
+    weight: 1,
+    guidance:
+      "Write from Alphazox's own perspective about what it's actually like building an IT/AI company right now - a real lesson, decision, engineering challenge, or moment of progress. Human, honest, behind-the-scenes tone (not a case study, not a sales pitch) meant to build genuine connection with the audience, not to sell.",
+    visualHint: 'authentic team-at-work visual (engineers collaborating, whiteboard session, small growing team) - warm and human, not corporate stock-photo generic',
+    imageKeywords: ['startup team working together', 'engineers collaborating whiteboard', 'small tech team office'],
+  },
 ];
+
+export function getThemeById(id: string): ContentTheme {
+  const theme = CONTENT_THEMES.find((t) => t.id === id);
+  if (!theme) {
+    throw new Error(`Unknown content theme id: ${id}`);
+  }
+  return theme;
+}
 
 /**
  * Excludes recently-used theme ids (see PostRepository.getRecentlyUsedThemeIds)

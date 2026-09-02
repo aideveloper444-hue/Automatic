@@ -406,42 +406,7 @@ Each "hashtags" value MUST be a single space-separated string, NOT a JSON array.
       }
 
       const bundle = validation.data;
-      const problems: string[] = [];
-
-      const linkedinWords = countWords(bundle.linkedin.content);
-      if (linkedinWords < NEWS_LINKEDIN_WORD_RANGE.min || linkedinWords > NEWS_LINKEDIN_WORD_RANGE.max) {
-        problems.push(`linkedin word count ${linkedinWords}`);
-      }
-      const linkedinHashtags = countHashtags(bundle.linkedin.hashtags);
-      if (
-        linkedinHashtags < NEWS_LINKEDIN_HASHTAG_RANGE.min ||
-        linkedinHashtags > NEWS_LINKEDIN_HASHTAG_RANGE.max ||
-        !hasAlphazoxHashtag(bundle.linkedin.hashtags)
-      ) {
-        problems.push(`linkedin hashtags ${linkedinHashtags}`);
-      }
-
-      const instagramWords = countWords(bundle.instagram.caption);
-      if (instagramWords < NEWS_INSTAGRAM_WORD_RANGE.min || instagramWords > NEWS_INSTAGRAM_WORD_RANGE.max) {
-        problems.push(`instagram word count ${instagramWords}`);
-      }
-      const instagramHashtags = countHashtags(bundle.instagram.hashtags);
-      if (
-        instagramHashtags < NEWS_INSTAGRAM_HASHTAG_RANGE.min ||
-        instagramHashtags > NEWS_INSTAGRAM_HASHTAG_RANGE.max ||
-        !hasAlphazoxHashtag(bundle.instagram.hashtags)
-      ) {
-        problems.push(`instagram hashtags ${instagramHashtags}`);
-      }
-
-      const twitterCombinedLength = `${bundle.twitter.content} ${bundle.twitter.hashtags}`.trim().length;
-      if (twitterCombinedLength > TWITTER_CHAR_LIMIT) {
-        problems.push(`twitter length ${twitterCombinedLength}`);
-      }
-      const twitterHashtags = countHashtags(bundle.twitter.hashtags);
-      if (twitterHashtags < NEWS_TWITTER_HASHTAG_RANGE.min || twitterHashtags > NEWS_TWITTER_HASHTAG_RANGE.max) {
-        problems.push(`twitter hashtags ${twitterHashtags}`);
-      }
+      const problems = this.validateBundleShape(bundle);
 
       if (problems.length > 0) {
         appLogger.warn('News post bundle failed validation; regenerating', { attempt, problems });
@@ -457,6 +422,163 @@ Each "hashtags" value MUST be a single space-separated string, NOT a JSON array.
     }
 
     throw new GroqServiceError(`Unable to generate a valid news post bundle for "${story.headline}" after retries`);
+  }
+
+  private buildThemedBundlePrompt(theme: ContentTheme, recentHeadlines: string[]): string {
+    const isPromotional = theme.id === 'brand-story';
+    const toneNote = isPromotional
+      ? 'This theme (Alphazox Brand Story) is the only one allowed to be promotional - write about Alphazox itself ' +
+        'and one concrete service capability/outcome, with a clear CTA inviting the reader to reach out to ALPHAZOX.'
+      : 'Write as genuine, human, behind-the-scenes content, not an advertisement - no hard sales pitch or "reach ' +
+        'out to us" CTA; end with something that invites reflection or discussion instead.';
+    const avoidBlock =
+      recentHeadlines.length > 0
+        ? `\nAvoid reusing the opening sentence, angle, or hashtag set of these recent ALPHAZOX posts:\n${recentHeadlines.map((h) => `- ${h}`).join('\n')}\n`
+        : '';
+
+    return `You are the ALPHAZOX Technology Intelligence, Content & Social Media Engine. ALPHAZOX is an IT and
+digital transformation company (https://www.alphazox.com/).
+
+Today's content theme: "${theme.label}"
+Theme instructions: ${theme.guidance}
+${toneNote}
+${avoidBlock}
+Never invent or approximate statistics, customer counts, revenue, awards, certifications, or partnerships. If
+you're not certain a specific number is accurate, do not include a number at all. Do not give harmful, exploit,
+or attack-execution instructions.
+
+Write THREE distinct, platform-specific posts for this SAME theme - do not copy the same text across platforms,
+each must be written fresh for its platform's audience and format.
+
+1. LINKEDIN (audience: CIOs, CTOs, CEOs, technology leaders, developers, enterprise decision-makers):
+   MUST be at least ${NEWS_LINKEDIN_WORD_RANGE.min} words and no more than ${NEWS_LINKEDIN_WORD_RANGE.max} - count
+   as you write. Authoritative, professional tone.
+
+2. INSTAGRAM (general engaged audience):
+   MUST be at least ${NEWS_INSTAGRAM_WORD_RANGE.min} words and no more than ${NEWS_INSTAGRAM_WORD_RANGE.max} -
+   count as you write. Short paragraphs, emojis used sparingly and professionally.
+
+3. X/TWITTER: the single sharpest version of this idea. Maximum ${TWITTER_CHAR_LIMIT} characters TOTAL including
+   hashtags. Concise and high-impact - this must be ONE post, not a thread.
+
+Also write "cardHeadline" (an array of 1 to 3 very short punchy lines, each under 6 words, for large display text
+on an image - the single main idea, not a sentence) and "cardSubheadline" (one short supporting sentence, under 18
+words).
+
+Hashtag rules (apply to every platform): relevant, natural, topic-specific to this theme. Always include
+#ALPHAZOX in every platform's hashtag list.
+- linkedin hashtags: EXACTLY ${NEWS_LINKEDIN_HASHTAG_RANGE.min} to ${NEWS_LINKEDIN_HASHTAG_RANGE.max} hashtags.
+- instagram hashtags: EXACTLY ${NEWS_INSTAGRAM_HASHTAG_RANGE.min} to ${NEWS_INSTAGRAM_HASHTAG_RANGE.max} hashtags.
+- twitter hashtags: EXACTLY ${NEWS_TWITTER_HASHTAG_RANGE.min} to ${NEWS_TWITTER_HASHTAG_RANGE.max} hashtags, and
+  they must fit within the ${TWITTER_CHAR_LIMIT}-character total limit above.
+
+Output JSON only, with this exact shape:
+{
+  "cardHeadline": ["...", "..."],
+  "cardSubheadline": "...",
+  "linkedin": { "content": "...", "hashtags": "#Tag1 #Tag2 ..." },
+  "instagram": { "caption": "...", "hashtags": "#Tag1 #Tag2 ..." },
+  "twitter": { "content": "...", "hashtags": "#Tag1 #Tag2 ..." }
+}
+Each "hashtags" value MUST be a single space-separated string, NOT a JSON array.`;
+  }
+
+  /**
+   * Same three-platform bundle shape as generateNewsPostBundle, but drafted
+   * from a content theme (see config/content-themes.ts) instead of a
+   * researched NewsStory - the non-news lanes of the hourly rotation
+   * ("Startup/Building Alphazox", "Alphazox products/projects" - see
+   * scheduler.service.ts) that aren't live news events.
+   */
+  async generateThemedPostBundle(theme: ContentTheme, recentHeadlines: string[]): Promise<NewsPostBundle> {
+    const prompt = this.buildThemedBundlePrompt(theme, recentHeadlines);
+
+    for (let attempt = 1; attempt <= NEWS_MAX_GENERATION_ATTEMPTS; attempt += 1) {
+      if (attempt > 1) {
+        await sleep(4000 * (attempt - 1));
+      }
+
+      const rawText = await this.callGroqApi(
+        prompt,
+        `ThemedBundle(${theme.id})`,
+        attempt,
+        NEWS_MAX_GENERATION_ATTEMPTS,
+        6500,
+      );
+
+      if (rawText === null) {
+        continue;
+      }
+
+      const validation = NewsPostBundleSchema.safeParse(this.safeParseJson(rawText));
+
+      if (!validation.success) {
+        appLogger.warn('Groq response failed schema validation for themed post bundle', {
+          theme: theme.id,
+          attempt,
+          issues: validation.error.issues.map((issue) => issue.message),
+        });
+        continue;
+      }
+
+      const bundle = validation.data;
+      const problems = this.validateBundleShape(bundle);
+
+      if (problems.length > 0) {
+        appLogger.warn('Themed post bundle failed validation; regenerating', { theme: theme.id, attempt, problems });
+        continue;
+      }
+
+      if (await this.isDuplicateAgainstRecent(bundle.linkedin.content, 'linkedin')) {
+        appLogger.info('Duplicate detected for themed post bundle; regenerating', { theme: theme.id, attempt });
+        continue;
+      }
+
+      return bundle;
+    }
+
+    throw new GroqServiceError(`Unable to generate a valid themed post bundle (${theme.id}) after retries`);
+  }
+
+  private validateBundleShape(bundle: NewsPostBundle): string[] {
+    const problems: string[] = [];
+
+    const linkedinWords = countWords(bundle.linkedin.content);
+    if (linkedinWords < NEWS_LINKEDIN_WORD_RANGE.min || linkedinWords > NEWS_LINKEDIN_WORD_RANGE.max) {
+      problems.push(`linkedin word count ${linkedinWords}`);
+    }
+    const linkedinHashtags = countHashtags(bundle.linkedin.hashtags);
+    if (
+      linkedinHashtags < NEWS_LINKEDIN_HASHTAG_RANGE.min ||
+      linkedinHashtags > NEWS_LINKEDIN_HASHTAG_RANGE.max ||
+      !hasAlphazoxHashtag(bundle.linkedin.hashtags)
+    ) {
+      problems.push(`linkedin hashtags ${linkedinHashtags}`);
+    }
+
+    const instagramWords = countWords(bundle.instagram.caption);
+    if (instagramWords < NEWS_INSTAGRAM_WORD_RANGE.min || instagramWords > NEWS_INSTAGRAM_WORD_RANGE.max) {
+      problems.push(`instagram word count ${instagramWords}`);
+    }
+    const instagramHashtags = countHashtags(bundle.instagram.hashtags);
+    if (
+      instagramHashtags < NEWS_INSTAGRAM_HASHTAG_RANGE.min ||
+      instagramHashtags > NEWS_INSTAGRAM_HASHTAG_RANGE.max ||
+      !hasAlphazoxHashtag(bundle.instagram.hashtags)
+    ) {
+      problems.push(`instagram hashtags ${instagramHashtags}`);
+    }
+
+    const twitterCombinedLength = `${bundle.twitter.content} ${bundle.twitter.hashtags}`.trim().length;
+    if (twitterCombinedLength > TWITTER_CHAR_LIMIT) {
+      problems.push(`twitter length ${twitterCombinedLength}`);
+    }
+    const twitterHashtags = countHashtags(bundle.twitter.hashtags);
+    if (twitterHashtags < NEWS_TWITTER_HASHTAG_RANGE.min || twitterHashtags > NEWS_TWITTER_HASHTAG_RANGE.max) {
+      problems.push(`twitter hashtags ${twitterHashtags}`);
+    }
+
+    return problems;
   }
 
   private async callGroqApi(
