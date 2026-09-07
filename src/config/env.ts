@@ -38,6 +38,15 @@ const envSchema = z.object({
   // deciding whether/how much to search, so it sidesteps that failure mode
   // entirely. Free tier at gnews.io comfortably covers this pipeline's cadence.
   GNEWS_API_KEY: z.string().optional(),
+  // Optional: epoch milliseconds captured at the top of the GitHub Actions
+  // job (see .github/workflows/hourly-automation.yml "Record run start time"),
+  // used by scheduler.service.ts to pick the hourly rotation slot. Reading a
+  // fresh Date() at execution time instead would be wrong here: each
+  // self-dispatched run's createdAt lands right before an hour boundary (by
+  // construction - see the workflow's sleep step), so ordinary setup latency
+  // (checkout, npm ci, Prisma) routinely pushes past :00 and silently shifts
+  // the rotation index. Falls back to Date.now() when unset (local dev).
+  RUN_START_EPOCH_MS: z.coerce.number().optional(),
 });
 
 export const env = envSchema.parse(process.env);

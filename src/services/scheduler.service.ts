@@ -110,9 +110,18 @@ export class SchedulerService {
   async runHourlyAutomation(): Promise<void> {
     appLogger.info('Hourly automation run started');
 
-    const postType = resolvePostType(new Date());
+    /**
+     * The job's own recorded start time (see env.RUN_START_EPOCH_MS), not a
+     * fresh Date() read - this run may already be several minutes into
+     * checkout/npm ci/Prisma setup by the time this line executes, and each
+     * self-dispatched run's actual start lands right before an hour boundary
+     * by construction, so a fresh clock read here would routinely cross into
+     * the next hour and silently skip/shift the rotation slot.
+     */
+    const referenceInstant = env.RUN_START_EPOCH_MS ? new Date(env.RUN_START_EPOCH_MS) : new Date();
+    const postType = resolvePostType(referenceInstant);
     const recentHeadlines = await this.postRepository.getRecentHeadlines();
-    const slot = pickRotationSlot(new Date());
+    const slot = pickRotationSlot(referenceInstant);
 
     let bundle: NewsPostBundle;
     let cardTheme: ContentTheme;

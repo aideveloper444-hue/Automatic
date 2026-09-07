@@ -84,6 +84,11 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PORT: 3000
           TIMEZONE: Asia/Kolkata
+          # See env.ts RUN_START_EPOCH_MS - the content rotation must key off
+          # this job's actual start, not a fresh clock read taken after
+          # checkout/npm ci/Prisma setup (which routinely crosses the hour
+          # boundary, since this run's own createdAt lands right before :00).
+          RUN_START_EPOCH_MS: ${{ steps.start_time.outputs.start_epoch }}000
         run: npm run generate:hourly
 
       # GitHub's own `schedule:` trigger (above) is best-effort and can be
