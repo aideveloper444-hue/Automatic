@@ -49,6 +49,7 @@ export class BufferService {
 
   private cachedOrganizationId: string | null = null;
   private readonly cachedChannelIdsByService = new Map<BufferChannelService, string[]>();
+  private cachedChannels: Array<{ id: string; service?: string }> | null = null;
 
   constructor(private readonly postRepository: PostRepository) {}
 
@@ -67,7 +68,25 @@ export class BufferService {
     label: string,
     variables?: Record<string, unknown>,
   ): Promise<T> {
-    const response = await this.client.post('/', { query, variables });
+    let response;
+    try {
+      response = await this.client.post('/', { query, variables });
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 429) {
+        const envelope = GraphQLEnvelopeSchema.safeParse(error.response.data);
+        const details = envelope.success ? envelope.data.errors?.map((e) => e.message).join('; ') : '';
+        const retryAfter = error.response.headers['retry-after'];
+        error.message = [
+          `${label}: Buffer API rate limit exceeded`,
+          details,
+          typeof retryAfter === 'string' ? `Retry-After: ${retryAfter} seconds` : '',
+        ]
+          .filter(Boolean)
+          .join('. ');
+      }
+      throw error;
+    }
+
     const envelope = GraphQLEnvelopeSchema.safeParse(response.data);
 
     if (!envelope.success) {
@@ -110,6 +129,10 @@ export class BufferService {
   }
 
   async getChannelIds(service: BufferChannelService, forceRefresh = false): Promise<string[]> {
+    if (forceRefresh) {
+      this.cachedChannels = null;
+    }
+
     const cached = this.cachedChannelIdsByService.get(service);
     if (cached && !forceRefresh) {
       return cached;
@@ -120,16 +143,19 @@ export class BufferService {
         appLogger.info('Fetching Buffer channels', { service, attempt });
 
         const organizationId = await this.getOrganizationId(attempt > 1);
-        const data = await this.graphqlRequest(
-          `query GetChannels($input: ChannelsInput!) {
-            channels(input: $input) { id name service }
-          }`,
-          BufferChannelsDataSchema,
-          `getChannelIds(${service})`,
-          { input: { organizationId } },
-        );
+        if (!this.cachedChannels) {
+          const data = await this.graphqlRequest(
+            `query GetChannels($input: ChannelsInput!) {
+              channels(input: $input) { id name service }
+            }`,
+            BufferChannelsDataSchema,
+            `getChannelIds(${service})`,
+            { input: { organizationId } },
+          );
+          this.cachedChannels = data.channels;
+        }
 
-        const channelIds = data.channels
+        const channelIds = this.cachedChannels
           .filter((channel) => channel.service === service)
           .map((channel) => channel.id);
 
@@ -143,7 +169,12 @@ export class BufferService {
         appLogger.info('Fetched Buffer channels', { service, count: channelIds.length });
         return channelIds;
       },
-      { retries: 3, delayMs: 500, label: `Buffer getChannelIds(${service})` },
+      {
+        retries: 3,
+        delayMs: 500,
+        label: `Buffer getChannelIds(${service})`,
+        shouldRetry: (error) => !(axios.isAxiosError(error) && error.response?.status === 429),
+      },
     );
   }
 
@@ -224,6 +255,7 @@ export class BufferService {
             retries: 3,
             delayMs: 1000,
             label: `Buffer createPost(service=${service}, channel=${channelId})`,
+            shouldRetry: (error) => !(axios.isAxiosError(error) && error.response?.status === 429),
           },
         );
 

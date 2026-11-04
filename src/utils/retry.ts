@@ -5,6 +5,7 @@ export interface RetryOptions {
   delayMs?: number;
   backoffFactor?: number;
   label?: string;
+  shouldRetry?: (error: unknown) => boolean;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,8 +25,12 @@ export async function retryWithBackoff<T>(
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
 
-      if (attempt === retries) {
-        appLogger.error(`${label} failed after ${retries} attempts`, { attempt, error: message });
+      if (attempt === retries || options.shouldRetry?.(error) === false) {
+        appLogger.error(`${label} failed; stopping retries`, {
+          attempt,
+          retries,
+          error: message,
+        });
         break;
       }
 

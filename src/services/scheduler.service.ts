@@ -247,6 +247,10 @@ export class SchedulerService {
       },
     });
 
+    if (!linkedinScheduled) {
+      throw new Error('LinkedIn post was not scheduled to Buffer; see the preceding scheduling error.');
+    }
+
     appLogger.info('Hourly automation run completed');
   }
 
