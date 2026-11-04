@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   run-automation:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       # Needed by every Prisma step (generate/db push), not just the final
       # script — hoisted to job level so it's never missing partway through.
@@ -43,12 +43,12 @@ jobs:
         run: echo "start_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
 
       - name: Install dependencies
@@ -58,7 +58,7 @@ jobs:
       # just won't exist to cache/restore). `secrets.*` can't be referenced
       # directly in `if:` conditions, so this isn't gated on that.
       - name: Restore SQLite database (best-effort persistence across runs)
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: prisma/dev.db
           key: sqlite-db-${{ github.run_id }}
