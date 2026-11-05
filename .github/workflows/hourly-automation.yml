@@ -33,6 +33,9 @@ concurrency:
 jobs:
   run-automation:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
     env:
       # Needed by every Prisma step (generate/db push), not just the final
       # script — hoisted to job level so it's never missing partway through.
@@ -96,10 +99,10 @@ jobs:
       # hourly cadence, each run instead re-triggers itself on-demand
       # (workflow_dispatch, which isn't subject to that queuing delay) after
       # sleeping out the rest of the hour. `if: always()` so a failed post
-      # this hour doesn't break next hour's chain. Requires the DISPATCH_TOKEN
-      # repo secret (a PAT with Actions read/write) - GITHUB_TOKEN can't be
-      # used here since GitHub blocks it from starting new workflow runs, to
-      # prevent recursive-trigger loops.
+      # this hour doesn't break next hour's chain. Uses the built-in
+      # GITHUB_TOKEN (granted `actions: write` above): GitHub blocks it from
+      # starting runs via most events, but explicitly allows workflow_dispatch,
+      # so no personal access token (and no token expiry) is involved.
       - name: Sleep until next hourly slot
         if: always()
         run: |
@@ -113,14 +116,10 @@ jobs:
       - name: Trigger next hourly run
         if: always()
         env:
-          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -z "$DISPATCH_TOKEN" ]; then
-            echo "DISPATCH_TOKEN secret not set; relying on the schedule trigger only (see repo Settings > Secrets and variables > Actions)" >&2
-            exit 0
-          fi
-          curl -sf -X POST \
-            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+          curl -sS --fail-with-body -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/hourly-automation.yml/dispatches" \
             -d '{"ref":"main"}'
