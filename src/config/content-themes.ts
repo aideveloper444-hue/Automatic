@@ -179,7 +179,7 @@ export const CONTENT_THEMES: ContentTheme[] = [
     label: 'Alphazox Brand Story',
     weight: 1,
     guidance:
-      'Write about Alphazox itself and one of its service capabilities: what the service does and the concrete outcome it delivers for a client. This is the only theme that should read as promotional.',
+      'Write about one Alphazox service capability: pick a real problem companies face in that area and explain, step by step, the approach Alphazox follows to solve it. Describe the method, not past projects, products, or client results. This is the only theme that should read as promotional.',
     visualHint: 'professional team/technology visual relevant to the specific service',
     imageKeywords: ['tech team collaboration office', 'software team meeting laptops', 'professional developers office'],
   },
@@ -188,7 +188,7 @@ export const CONTENT_THEMES: ContentTheme[] = [
     label: 'Building Alphazox',
     weight: 1,
     guidance:
-      "Write from Alphazox's own perspective about what it's actually like building an IT/AI company right now - a real lesson, decision, engineering challenge, or moment of progress. Human, honest, behind-the-scenes tone (not a case study, not a sales pitch) meant to build genuine connection with the audience, not to sell.",
+      "Write from Alphazox's own perspective about a challenge that IT/AI companies commonly run into (e.g. balancing fast AI prototyping with data privacy, scaling services across regions, keeping quality high while shipping fast) and the approach Alphazox follows to handle it - its principles and working method. Do not narrate invented events, decisions, or results as if they happened. Human, honest tone (not a case study, not a sales pitch) meant to build genuine connection with the audience, not to sell.",
     visualHint: 'authentic team-at-work visual (engineers collaborating, whiteboard session, small growing team) - warm and human, not corporate stock-photo generic',
     imageKeywords: ['startup team working together', 'engineers collaborating whiteboard', 'small tech team office'],
   },

@@ -6,6 +6,24 @@ export const BRAND = {
 };
 
 /**
+ * Shared by every post prompt. The model kept inventing Alphazox history
+ * ("we embedded privacy checks and cut weeks off delivery", "our flagship
+ * platform", "clients report...") - the client wants Alphazox's *approach*
+ * to a problem described instead, never claimed past work or results.
+ * "We"/"our" are fine when they describe how Alphazox works.
+ */
+export const APPROACH_NOT_CLAIMS_RULE = `How to talk about ALPHAZOX (strict):
+- Never claim ALPHAZOX has already done, built, shipped, chosen, or achieved something. No past-tense
+  stories ("we embedded...", "we chose...", "our team migrated..."), no results or timelines ("cut weeks
+  off delivery", "reduced costs by..."), no named products or platforms ("our flagship platform"), and no
+  client outcomes or testimonials ("clients report...").
+- Instead, describe the APPROACH ALPHAZOX follows to solve a problem, as method, not history: "When
+  privacy reviews slow AI delivery, the approach we follow is to build privacy checks into the CI/CD
+  pipeline so every model is checked before it reaches staging." Frame it as "if a company faces X,
+  this is how we solve it" and give the concrete steps.
+- "We" and "our" are fine when they describe how ALPHAZOX works or would work.`;
+
+/**
  * Per-platform feed image dimensions, so the same visual concept renders
  * without awkward cropping on each network (LinkedIn's 1.91:1 feed ratio,
  * Twitter's 16:9 in-feed ratio, Instagram's 1:1 square).

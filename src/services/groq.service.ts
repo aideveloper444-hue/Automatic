@@ -4,7 +4,7 @@ import { env } from '../config/env.js';
 import { appLogger } from '../config/logger.js';
 import { calculateTextSimilarity } from '../utils/similarity.js';
 import { GroqServiceError } from '../utils/errors.js';
-import { BRAND } from '../config/brand.js';
+import { APPROACH_NOT_CLAIMS_RULE, BRAND } from '../config/brand.js';
 import { InstagramVariantSchema, ThemedPostSchema, TwitterVariantSchema } from '../validation/content.schema.js';
 import { NewsPostBundleSchema, type NewsPostBundle, type NewsStory } from '../validation/news.schema.js';
 import type { ContentTheme } from '../config/content-themes.js';
@@ -319,16 +319,19 @@ what happened, what technology is involved, why it matters, what it means for bu
 could happen next. Where it is genuinely, naturally relevant, connect the story to ALPHAZOX capabilities (AI/ML,
 Cloud, custom software development, DevOps, data science, RPA, cybersecurity, analytics, digital transformation,
 enterprise modernization, GCCs) - do not force a pitch into every post. Never invent facts or present rumor as
-confirmed.
+confirmed. When you connect the story to ALPHAZOX, explain the approach ALPHAZOX would follow to solve the
+problem the story raises.
+
+${APPROACH_NOT_CLAIMS_RULE}
 
 1. LINKEDIN (audience: CIOs, CTOs, CEOs, technology leaders, developers, enterprise decision-makers):
-   Structure: strong opening hook, what happened, why it matters, business/enterprise implications, ALPHAZOX
-   perspective, then a question to encourage discussion. MUST be at least ${NEWS_LINKEDIN_WORD_RANGE.min} words and
+   Structure: strong opening hook, what happened, why it matters, business/enterprise implications, the
+   approach ALPHAZOX follows to solve this kind of problem, then a question to encourage discussion. MUST be at least ${NEWS_LINKEDIN_WORD_RANGE.min} words and
    no more than ${NEWS_LINKEDIN_WORD_RANGE.max} - count as you write and expand the business/enterprise
    implications section with concrete detail if you're at risk of finishing short. Authoritative, professional tone.
 
 2. INSTAGRAM (general engaged audience):
-   Structure: strong hook, what happened, why it matters, ALPHAZOX insight, engagement question/CTA. MUST be at
+   Structure: strong hook, what happened, why it matters, how ALPHAZOX would approach it, engagement question/CTA. MUST be at
    least ${NEWS_INSTAGRAM_WORD_RANGE.min} words and no more than ${NEWS_INSTAGRAM_WORD_RANGE.max} - count as you
    write. Short paragraphs, emojis used sparingly
    and professionally.
@@ -446,6 +449,8 @@ ${avoidBlock}
 Never invent or approximate statistics, customer counts, revenue, awards, certifications, or partnerships. If
 you're not certain a specific number is accurate, do not include a number at all. Do not give harmful, exploit,
 or attack-execution instructions.
+
+${APPROACH_NOT_CLAIMS_RULE}
 
 Write THREE distinct, platform-specific posts for this SAME theme - do not copy the same text across platforms,
 each must be written fresh for its platform's audience and format.
